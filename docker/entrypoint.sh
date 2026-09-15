@@ -394,6 +394,15 @@ ip rule del fwmark "$XRAY_MARK" lookup main pref 10 2>/dev/null || true
 ip rule del lookup "$TUN_TABLE" pref 20 2>/dev/null || true
 ip route flush table "$TUN_TABLE" 2>/dev/null || true
 
+# 4b-pre. Обратный путь: ответы клиентам LAN и роутеру — через main (veth).
+# Без этого они уходят в tun0 (правило 20) и умирают в петле:
+# - SYN-ACK клиентам LAN
+# - ICMP-ответы роутеру (check-gateway=ping!)
+LAN_NETS="${LAN_NETS:-192.168.10.0/24 10.10.10.0/24}"
+for net in $LAN_NETS; do
+  ip rule add pref 15 to "$net" lookup main 2>/dev/null || true
+done
+ip rule add pref 15 to 172.17.0.0/24 lookup main 2>/dev/null || true
 ip rule add fwmark "$XRAY_MARK" lookup main pref 10
 ip route add default dev "$TUN_DEV" table "$TUN_TABLE"
 ip rule add lookup "$TUN_TABLE" pref 20
