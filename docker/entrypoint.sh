@@ -266,27 +266,41 @@ log "Setting up TUN $TUN_DEV"
 sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
 
 # --- Автодетект внешнего интерфейса ---
-# Определяем первый не-loopback интерфейс, который не tun.
-ETH_DEV=$(ip -o link show | awk -F': ' '$2!="lo" && $2!~/^tun/ {print $2; exit}' | sed 's/@.*//')
+# Ищем интерфейс, у которого есть адрес из подсети 172.17.x.x (контейнерная сеть MikroTik).
+# Если не нашли — берём первый не-lo, не-tun.
+ETH_DEV=$(ip -o -4 addr show | awk '$4 ~ /^172\.17\./ {print $2; exit}' | sed 's/@.*//')
+if [ -z "$ETH_DEV" ]; then
+  ETH_DEV=$(ip -o link show | awk -F': ' '$2!="lo" && $2!~/^tun/ {print $2; exit}' | sed 's/@.*//')
+fi
 [ -n "$ETH_DEV" ] || die "Cannot detect external interface"
 log "External interface: $ETH_DEV"
 
+# --- Удаляем stale tun0 (если остался от прошлого запуска) ---
+if ip link show "$TUN_DEV" >/dev/null 2>&1; then
+  log "Removing stale $TUN_DEV"
+  ip link delete "$TUN_DEV" 2>/dev/null || true
+  sleep 1
+fi
+
 # --- Автодетект шлюза ---
 HOST_GW=$(ip route show default 2>/dev/null | awk '/default/ {print $3; exit}')
-[ -n "$HOST_GW" ] || die "Cannot detect host gateway on $ETH_DEV"
+[ -n "$HOST_GW" ] || die "Cannot detect host gateway"
 log "Host gateway: $HOST_GW"
 
-# --- Резолвим IP VPS (до смены маршрута) ---
+# --- Резолвим VPS IP (до смены default route) ---
 VPS_IP=$(getent ahostsv4 "$SERVER" 2>/dev/null | awk 'NR==1{print $1}')
 [ -n "$VPS_IP" ] || VPS_IP="$SERVER"
 log "VPS IP: $VPS_IP"
 
 # --- Policy routing: Xray "direct" (mark=255) → таблица 100 → eth ---
-# ЭТО НАДО СДЕЛАТЬ ДО запуска tun2socks и смены default!
-ip rule add fwmark "$XRAY_MARK" lookup 100 priority 100 2>/dev/null || true
+log "Configuring policy routing (fwmark=$XRAY_MARK → table 100)"
+ip rule del fwmark "$XRAY_MARK" lookup 100 priority 100 2>/dev/null || true
+ip rule add fwmark "$XRAY_MARK" lookup 100 priority 100
 ip route replace default via "$HOST_GW" dev "$ETH_DEV" table 100
+log "  table 100: default via $HOST_GW dev $ETH_DEV"
 
-# --- Сохраняем маршруты до VPS и до подсетей через внешний интерфейс ---
+# --- Фиксируем маршруты до VPS и локальных подсетей через внешний интерфейс ---
+log "Pinning routes to VPS and LAN"
 ip route replace "$VPS_IP"         via "$HOST_GW" dev "$ETH_DEV" 2>/dev/null || true
 ip route replace 192.168.10.0/24   via "$HOST_GW" dev "$ETH_DEV" 2>/dev/null || true
 ip route replace 10.10.10.0/24     via "$HOST_GW" dev "$ETH_DEV" 2>/dev/null || true
@@ -300,42 +314,45 @@ sleep 2
 kill -0 "$XRAY_PID" 2>/dev/null || die "Xray process died"
 log "Xray started (PID=$XRAY_PID)"
 
-# --- Запускаем tun2socks (он сам создаст TUN) ---
-# ВАЖНО: НЕ вызываем ip tuntap заранее — tun2socks сам создаст tun0.
+# --- Запускаем tun2socks с логированием ---
+T2S_LOG=/tmp/tun2socks.log
 log "Starting tun2socks → socks5://127.0.0.1:$SOCKS_PORT"
 tun2socks \
   -device "tun://$TUN_DEV" \
   -proxy  "socks5://127.0.0.1:$SOCKS_PORT" \
   -tcp-sniff -udp-sniff \
-  -loglevel "$LOG_LEVEL" &
+  -loglevel debug \
+  > "$T2S_LOG" 2>&1 &
 T2S_PID=$!
 
-# --- Ждём, пока tun2socks поднимет tun0 ---
 sleep 3
 if ! kill -0 "$T2S_PID" 2>/dev/null; then
+  log "[ERROR] tun2socks died. Log output:"
+  cat "$T2S_LOG"
+  log "[ERROR] End of tun2socks log"
   die "tun2socks died immediately after start"
 fi
 log "tun2socks started (PID=$T2S_PID)"
 
-# --- Проверяем, что tun0 появился и UP ---
-if ! ip link show "$TUN_DEV" 2>/dev/null | grep -q "state UP"; then
-  log "WARNING: $TUN_DEV is not UP yet, waiting 3 more seconds"
-  sleep 3
-  ip link show "$TUN_DEV" 2>/dev/null | grep -q "state UP" \
-    || log "WARNING: $TUN_DEV still not UP. Continuing anyway."
+# --- Проверяем tun0 ---
+sleep 2
+if ip link show "$TUN_DEV" 2>/dev/null | grep -q "state UP"; then
+  log "$TUN_DEV is UP"
+else
+  log "WARNING: $TUN_DEV state:"
+  ip link show "$TUN_DEV" 2>/dev/null || log "  $TUN_DEV does not exist"
 fi
 
-# --- Только теперь меняем default route на tun0 ---
+# --- Меняем default route на tun0 ---
 ip route replace default dev "$TUN_DEV"
 log "Default route → $TUN_DEV"
 
-# --- Финальный отчёт ---
 log "=== Routes ==="
 ip route show
 log "=== Rules ==="
 ip rule show
 log "=== Interfaces ==="
-ip link show
+ip -br link show
 
 # --- Signal handling ---
 trap 'log "Stopping..."; kill $T2S_PID $XRAY_PID 2>/dev/null; wait; exit 0' TERM INT
