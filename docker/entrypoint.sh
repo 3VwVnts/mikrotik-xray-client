@@ -267,7 +267,7 @@ sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
 
 # --- Автодетект внешнего интерфейса ---
 # Определяем первый не-loopback интерфейс, который не tun.
-ETH_DEV=$(ip -o link show | awk -F': ' '$2!="lo" && $2!~/^tun/ {print $2; exit}')
+ETH_DEV=$(ip -o link show | awk -F': ' '$2!="lo" && $2!~/^tun/ {print $2; exit}' | sed 's/@.*//')
 [ -n "$ETH_DEV" ] || die "Cannot detect external interface"
 log "External interface: $ETH_DEV"
 
