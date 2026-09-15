@@ -11,7 +11,6 @@ TUN_DEV="${TUN_DEV:-tun0}"
 TUN_ADDR="${TUN_ADDR:-198.18.0.1/15}"
 SOCKS_PORT="${SOCKS_PORT:-10808}"
 HTTP_PORT="${HTTP_PORT:-10809}"
-ETH_DEV="${ETH_DEV:-eth0}"
 CUSTOM_RULES_FILE="${CUSTOM_RULES_FILE:-/etc/xray/custom-rules.json}"
 CONFIG_FILE="${XRAY_LOCATION_CONFIG:-/etc/xray/config.json}"
 GEO_CACHE_DIR="${GEO_CACHE_DIR:-/var/lib/xray/geo}"
@@ -266,31 +265,43 @@ fi
 log "Setting up TUN $TUN_DEV"
 sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
 
-ip tuntap add mode tun dev "$TUN_DEV" 2>/dev/null || true
-ip addr add "$TUN_ADDR" dev "$TUN_DEV" 2>/dev/null || true
-ip link set "$TUN_DEV" up
+# --- Автодетект внешнего интерфейса ---
+# Определяем первый не-loopback интерфейс, который не tun.
+ETH_DEV=$(ip -o link show | awk -F': ' '$2!="lo" && $2!~/^tun/ {print $2; exit}')
+[ -n "$ETH_DEV" ] || die "Cannot detect external interface"
+log "External interface: $ETH_DEV"
 
+# --- Автодетект шлюза ---
 HOST_GW=$(ip route show default 2>/dev/null | awk '/default/ {print $3; exit}')
 [ -n "$HOST_GW" ] || die "Cannot detect host gateway on $ETH_DEV"
 log "Host gateway: $HOST_GW"
 
+# --- Резолвим IP VPS (до смены маршрута) ---
 VPS_IP=$(getent ahostsv4 "$SERVER" 2>/dev/null | awk 'NR==1{print $1}')
 [ -n "$VPS_IP" ] || VPS_IP="$SERVER"
 log "VPS IP: $VPS_IP"
 
-ip route replace "$VPS_IP"       via "$HOST_GW" dev "$ETH_DEV" 2>/dev/null || true
-ip route replace 192.168.10.0/24 via "$HOST_GW" dev "$ETH_DEV" 2>/dev/null || true
-ip route replace 10.10.10.0/24   via "$HOST_GW" dev "$ETH_DEV" 2>/dev/null || true
-
+# --- Policy routing: Xray "direct" (mark=255) → таблица 100 → eth ---
+# ЭТО НАДО СДЕЛАТЬ ДО запуска tun2socks и смены default!
 ip rule add fwmark "$XRAY_MARK" lookup 100 priority 100 2>/dev/null || true
-ip route add default via "$HOST_GW" dev "$ETH_DEV" table 100 2>/dev/null || true
+ip route replace default via "$HOST_GW" dev "$ETH_DEV" table 100
 
+# --- Сохраняем маршруты до VPS и до подсетей через внешний интерфейс ---
+ip route replace "$VPS_IP"         via "$HOST_GW" dev "$ETH_DEV" 2>/dev/null || true
+ip route replace 192.168.10.0/24   via "$HOST_GW" dev "$ETH_DEV" 2>/dev/null || true
+ip route replace 10.10.10.0/24     via "$HOST_GW" dev "$ETH_DEV" 2>/dev/null || true
+ip route replace 172.17.0.0/24     via "$HOST_GW" dev "$ETH_DEV" 2>/dev/null || true
+
+# --- Запускаем Xray ---
 log "Starting Xray"
 xray run -c "$CONFIG_FILE" &
 XRAY_PID=$!
 sleep 2
 kill -0 "$XRAY_PID" 2>/dev/null || die "Xray process died"
+log "Xray started (PID=$XRAY_PID)"
 
+# --- Запускаем tun2socks (он сам создаст TUN) ---
+# ВАЖНО: НЕ вызываем ip tuntap заранее — tun2socks сам создаст tun0.
 log "Starting tun2socks → socks5://127.0.0.1:$SOCKS_PORT"
 tun2socks \
   -device "tun://$TUN_DEV" \
@@ -298,12 +309,34 @@ tun2socks \
   -tcp-sniff -udp-sniff \
   -loglevel "$LOG_LEVEL" &
 T2S_PID=$!
-sleep 2
 
+# --- Ждём, пока tun2socks поднимет tun0 ---
+sleep 3
+if ! kill -0 "$T2S_PID" 2>/dev/null; then
+  die "tun2socks died immediately after start"
+fi
+log "tun2socks started (PID=$T2S_PID)"
+
+# --- Проверяем, что tun0 появился и UP ---
+if ! ip link show "$TUN_DEV" 2>/dev/null | grep -q "state UP"; then
+  log "WARNING: $TUN_DEV is not UP yet, waiting 3 more seconds"
+  sleep 3
+  ip link show "$TUN_DEV" 2>/dev/null | grep -q "state UP" \
+    || log "WARNING: $TUN_DEV still not UP. Continuing anyway."
+fi
+
+# --- Только теперь меняем default route на tun0 ---
 ip route replace default dev "$TUN_DEV"
+log "Default route → $TUN_DEV"
 
-log "Routes:"; ip route show
-log "Rules:";  ip rule show
+# --- Финальный отчёт ---
+log "=== Routes ==="
+ip route show
+log "=== Rules ==="
+ip rule show
+log "=== Interfaces ==="
+ip link show
 
+# --- Signal handling ---
 trap 'log "Stopping..."; kill $T2S_PID $XRAY_PID 2>/dev/null; wait; exit 0' TERM INT
 wait $XRAY_PID $T2S_PID

@@ -1,0 +1,42 @@
+{
+  "_comment": "Домены и IP для принудительного направления через proxy или direct.",
+  "_format": {
+    "proxy_domains": "массив доменов/geosite — через Xray",
+    "proxy_ips": "массив IP/подсетей — через Xray",
+    "direct_domains": "массив доменов — напрямую (через L2TP)",
+    "direct_ips": "массив IP — напрямую"
+  },
+
+  "proxy_domains": [
+    "domain:instagram.com",
+    "domain:cdninstagram.com",
+    "domain:facebook.com",
+    "domain:fbcdn.net",
+    "domain:discord.com",
+    "domain:discordapp.com",
+    "domain:netflix.com",
+    "domain:nflxvideo.net",
+    "domain:spotify.com",
+    "domain:scdn.co",
+    "domain:openai.com",
+    "domain:chatgpt.com",
+    "geosite:netflix",
+    "geosite:spotify",
+    "geosite:discord"
+  ],
+
+  "proxy_ips": [],
+
+  "direct_domains": [
+    "domain:sberbank.ru",
+    "domain:sber.ru",
+    "domain:gosuslugi.ru",
+    "domain:nalog.ru",
+    "domain:mos.ru",
+    "domain:yandex.ru",
+    "domain:vk.com",
+    "domain:mail.ru"
+  ],
+
+  "direct_ips": []
+}
