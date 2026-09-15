@@ -17,6 +17,7 @@ GEO_CACHE_DIR="${GEO_CACHE_DIR:-/var/lib/xray/geo}"
 GEO_MAX_AGE_DAYS="${GEO_MAX_AGE_DAYS:-3}"
 GEO_FORCE_UPDATE="${GEO_FORCE_UPDATE:-0}"
 GEO_SKIP_DOWNLOAD="${GEO_SKIP_DOWNLOAD:-0}"
+DEBUG_HOLD="${DEBUG_HOLD:-0}"
 GEODATA_URL="https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download"
 XRAY_MARK=255
 
@@ -267,6 +268,7 @@ sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
 sysctl -w net.ipv4.conf.all.rp_filter=0 >/dev/null 2>&1 || true
 sysctl -w net.ipv4.conf.default.rp_filter=0 >/dev/null 2>&1 || true
 
+# --- Нормализация ip rule для RouterOS 7.22+ ---
 log "Normalizing ip rule priorities (RouterOS 7.22+ fix)"
 while ip rule show | grep -Eq '^1:\s+from all lookup local'; do
   ip rule del pref 1 2>/dev/null || break
@@ -281,7 +283,7 @@ ip rule add pref 200 from all lookup local 2>/dev/null || true
 ip rule add pref 2147483646 from all lookup main 2>/dev/null || true
 ip rule add pref 2147483647 from all lookup default 2>/dev/null || true
 
-# --- Автодетект внешнего интерфейса ---
+# --- Автодетект внешнего интерфейса (veth-xray в MikroTik) ---
 ETH_DEV=$(ip -o -4 addr show | awk '$4 ~ /^172\.17\./ {print $2; exit}' | sed 's/@.*//')
 if [ -z "$ETH_DEV" ]; then
   ETH_DEV=$(ip -o link show | awk -F': ' '$2!="lo" && $2!~/^tun/ {print $2; exit}' | sed 's/@.*//')
@@ -289,32 +291,25 @@ fi
 [ -n "$ETH_DEV" ] || die "Cannot detect external interface"
 log "External interface: $ETH_DEV"
 
-# --- Получаем IP и шлюз с этого интерфейса ---
-VETH_IP=$(ip -o -4 addr show dev "$ETH_DEV" | awk '{print $4}' | cut -d/ -f1)
-log "Container IP: $VETH_IP"
-
+# --- Автодетект шлюза ---
 HOST_GW=$(ip route show default 2>/dev/null | awk '/default/ {print $3; exit}')
 [ -n "$HOST_GW" ] || die "Cannot detect host gateway"
 log "Host gateway: $HOST_GW"
 
-# --- Резолвим VPS IP ---
+# --- Резолвим VPS IP (до смены default route) ---
 VPS_IP=$(getent ahostsv4 "$SERVER" 2>/dev/null | awk 'NR==1{print $1}')
 [ -n "$VPS_IP" ] || VPS_IP="$SERVER"
 log "VPS IP: $VPS_IP"
 
 # --- Policy routing: fwmark 255 → table 100 ---
 log "Configuring policy routing (fwmark=$XRAY_MARK → table 100)"
-
-# Правило fwmark
 ip rule del fwmark "$XRAY_MARK" lookup 100 2>/dev/null || true
 ip rule add fwmark "$XRAY_MARK" lookup 100 priority 100
 
+# Таблица 100 должна знать, как достичь шлюза 172.17.0.1
 ip route replace 172.17.0.0/24 dev "$ETH_DEV" scope link table 100
-log "  table 100: 172.17.0.0/24 dev $ETH_DEV scope link"
-
-# Теперь default через шлюз
 ip route replace default via "$HOST_GW" dev "$ETH_DEV" onlink table 100
-log "  table 100: default via $HOST_GW dev $ETH_DEV"
+log "  table 100 configured"
 
 # --- Фиксируем маршруты до VPS и LAN в main ---
 log "Pinning routes to VPS and LAN in main table"
@@ -330,43 +325,21 @@ sleep 2
 kill -0 "$XRAY_PID" 2>/dev/null || die "Xray process died"
 log "Xray started (PID=$XRAY_PID)"
 
-# --- ДИАГНОСТИКА tun2socks ---
-log "=== tun2socks binary diagnostics ==="
-if [ -f /usr/local/bin/tun2socks ]; then
-  log "  file exists"
-  ls -la /usr/local/bin/tun2socks 2>&1 || true
-  if [ -x /usr/local/bin/tun2socks ]; then
-    log "  executable: YES"
-  else
-    log "  executable: NO — chmod +x"
-  fi
-else
-  log "  file MISSING at /usr/local/bin/tun2socks"
-fi
-
-log "=== tun2socks --version ==="
-/usr/local/bin/tun2socks --version 2>&1 || log "  --version exit code: $?"
-
-log "=== tun2socks --help (first 30 lines) ==="
-/usr/local/bin/tun2socks --help 2>&1 | head -30 || log "  --help exit code: $?"
-
-log "=== /dev/net/tun ==="
-ls -la /dev/net/ 2>&1 || log "  /dev/net missing"
-
-log "=== End diagnostics ==="
-
 # --- Запускаем tun2socks ---
+# tun2socks сам создаёт TUN и выполняет команды из -tun-post-up
 T2S_LOG=/tmp/tun2socks.log
 log "Starting tun2socks → socks5://127.0.0.1:$SOCKS_PORT"
 tun2socks \
   -device "tun://$TUN_DEV" \
   -proxy  "socks5://127.0.0.1:$SOCKS_PORT" \
-  -tcp-sniff -udp-sniff \
-  -loglevel debug \
+  -tun-post-up "ip addr add $TUN_ADDR dev $TUN_DEV && ip link set $TUN_DEV up" \
+  -loglevel info \
   > "$T2S_LOG" 2>&1 &
 T2S_PID=$!
 
-sleep 3
+# Даём время на создание TUN и выполнение -tun-post-up
+sleep 4
+
 if ! kill -0 "$T2S_PID" 2>/dev/null; then
   EXIT_CODE=$(wait "$T2S_PID" 2>/dev/null; echo $?)
   log "[ERROR] tun2socks died. Exit code: $EXIT_CODE"
@@ -375,7 +348,7 @@ if ! kill -0 "$T2S_PID" 2>/dev/null; then
   cat "$T2S_LOG" 2>&1 || log "  (cannot read log)"
   log "[ERROR] End of tun2socks log"
 
-  if [ "${DEBUG_HOLD:-0}" = "1" ]; then
+  if [ "$DEBUG_HOLD" = "1" ]; then
     log "DEBUG_HOLD=1: container will sleep 600s for manual inspection"
     log "  Connect via: /container/shell xray-client"
     sleep 600
@@ -384,6 +357,20 @@ if ! kill -0 "$T2S_PID" 2>/dev/null; then
   die "tun2socks died immediately after start"
 fi
 log "tun2socks started (PID=$T2S_PID)"
+
+# --- Проверяем, что tun0 UP ---
+if ip link show "$TUN_DEV" 2>/dev/null | grep -q "state UP"; then
+  log "$TUN_DEV is UP"
+else
+  log "WARNING: $TUN_DEV not UP, waiting 3 more seconds"
+  sleep 3
+  if ip link show "$TUN_DEV" 2>/dev/null | grep -q "state UP"; then
+    log "$TUN_DEV is UP now"
+  else
+    log "WARNING: $TUN_DEV still not UP:"
+    ip link show "$TUN_DEV" 2>/dev/null || log "  $TUN_DEV does not exist"
+  fi
+fi
 
 # --- Меняем default route на tun0 ---
 ip route replace default dev "$TUN_DEV"
