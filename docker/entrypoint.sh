@@ -190,8 +190,6 @@ ALL_RULES=$(jq -n \
 
 # ============================================================
 # Generate Xray config.json
-# ВАЖНО: и proxy, и direct outbounds маркируются fwmark=255,
-# чтобы их трафик шёл через main table (обход tun0).
 # ============================================================
 mkdir -p "$(dirname "$CONFIG_FILE")"
 
@@ -272,12 +270,10 @@ fi
 # ============================================================
 log "=== hev-socks5-tunnel mode ==="
 
-# --- Sysctl ---
 sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
 sysctl -w net.ipv4.conf.all.rp_filter=0 >/dev/null 2>&1 || true
 sysctl -w net.ipv4.conf.default.rp_filter=0 >/dev/null 2>&1 || true
 
-# --- Генерируем YAML-конфиг для hev-socks5-tunnel ---
 mkdir -p "$(dirname "$HEV_CONFIG")"
 cat > "$HEV_CONFIG" <<EOF
 tunnel:
@@ -308,26 +304,7 @@ EOF
 log "hev-tunnel config written: $HEV_CONFIG"
 cat "$HEV_CONFIG"
 
-# --- Policy routing: Xray (fwmark=255) → main, остальное → tun0 ---
-log "Configuring policy routing"
-log "  fwmark $XRAY_MARK → main table (bypass tunnel for Xray)"
-log "  default → table $TUN_TABLE → $TUN_DEV"
-
-# Убираем возможные старые правила от предыдущих запусков
-ip rule del fwmark "$XRAY_MARK" lookup main pref 10 2>/dev/null || true
-ip rule del lookup "$TUN_TABLE" pref 20 2>/dev/null || true
-ip route flush table "$TUN_TABLE" 2>/dev/null || true
-
-# Правило 1: Xray-трафик (маркирован) → main → veth-xray → хост
-ip rule add fwmark "$XRAY_MARK" lookup main pref 10
-
-# Правило 2: всё остальное → table 20 → tun0
-ip route add default dev "$TUN_DEV" table "$TUN_TABLE"
-ip rule add lookup "$TUN_TABLE" pref 20
-
-log "Routing rules configured"
-
-# --- Запускаем Xray ---
+# --- 1. Xray ---
 log "Starting Xray"
 xray run -c "$CONFIG_FILE" &
 XRAY_PID=$!
@@ -335,36 +312,60 @@ sleep 2
 kill -0 "$XRAY_PID" 2>/dev/null || die "Xray died on start"
 log "Xray started (PID=$XRAY_PID)"
 
-# --- Запускаем hev-socks5-tunnel ---
+# --- 2. hev-socks5-tunnel (создаёт tun0) ---
 HEV_LOG=/tmp/hev-tunnel.log
 log "Starting hev-socks5-tunnel → socks5://127.0.0.1:$SOCKS_PORT"
 /usr/local/bin/hev-socks5-tunnel "$HEV_CONFIG" > "$HEV_LOG" 2>&1 &
 HEV_PID=$!
 
-sleep 4
-
-if ! kill -0 "$HEV_PID" 2>/dev/null; then
-  EXIT_CODE=$(wait "$HEV_PID" 2>/dev/null; echo $?)
-  log "[ERROR] hev-socks5-tunnel died. Exit code: $EXIT_CODE"
-  log "[ERROR] Log file: $HEV_LOG"
-  cat "$HEV_LOG" 2>&1 || true
-  if [ "$DEBUG_HOLD" = "1" ]; then
-    log "DEBUG_HOLD=1: sleeping 600s"
-    sleep 600
+# --- 3. Ждём tun0 UP ---
+TUN_WAIT=0
+TUN_MAX_WAIT=15
+while [ "$TUN_WAIT" -lt "$TUN_MAX_WAIT" ]; do
+  if ip link show "$TUN_DEV" 2>/dev/null | grep -q "state UP"; then
+    log "$TUN_DEV is UP (after ${TUN_WAIT}s)"
+    break
   fi
-  die "hev-socks5-tunnel died"
-fi
-log "hev-socks5-tunnel started (PID=$HEV_PID)"
+  if ! kill -0 "$HEV_PID" 2>/dev/null; then
+    EXIT_CODE=$(wait "$HEV_PID" 2>/dev/null; echo $?)
+    log "[ERROR] hev-socks5-tunnel died. Exit code: $EXIT_CODE"
+    log "[ERROR] Log file: $HEV_LOG"
+    cat "$HEV_LOG" 2>&1 || true
+    if [ "$DEBUG_HOLD" = "1" ]; then
+      log "DEBUG_HOLD=1: sleeping 600s"
+      sleep 600
+    fi
+    die "hev-socks5-tunnel died"
+  fi
+  sleep 1
+  TUN_WAIT=$((TUN_WAIT + 1))
+done
 
-# --- Проверяем tun0 ---
-if ip link show "$TUN_DEV" 2>/dev/null | grep -q "state UP"; then
-  log "$TUN_DEV is UP"
-else
-  log "WARNING: $TUN_DEV not UP, waiting 3s more"
-  sleep 3
-  ip link show "$TUN_DEV" 2>/dev/null || log "  $TUN_DEV does not exist"
+if ! ip link show "$TUN_DEV" 2>/dev/null | grep -q "state UP"; then
+  log "[ERROR] $TUN_DEV did not come up within ${TUN_MAX_WAIT}s"
+  log "[ERROR] hev log:"
+  cat "$HEV_LOG" 2>&1 || true
+  die "$TUN_DEV failed to come up"
 fi
 
+log "hev-socks5-tunnel running (PID=$HEV_PID)"
+
+# --- 4. Policy routing (tun0 уже существует) ---
+log "Configuring policy routing"
+log "  fwmark $XRAY_MARK → main table"
+log "  default → table $TUN_TABLE → $TUN_DEV"
+
+ip rule del fwmark "$XRAY_MARK" lookup main pref 10 2>/dev/null || true
+ip rule del lookup "$TUN_TABLE" pref 20 2>/dev/null || true
+ip route flush table "$TUN_TABLE" 2>/dev/null || true
+
+ip rule add fwmark "$XRAY_MARK" lookup main pref 10
+ip route add default dev "$TUN_DEV" table "$TUN_TABLE"
+ip rule add lookup "$TUN_TABLE" pref 20
+
+log "Policy routing configured"
+
+# --- 5. Отчёт ---
 log "=== Routes (main) ==="
 ip route show
 log "=== Routes (table $TUN_TABLE) ==="
