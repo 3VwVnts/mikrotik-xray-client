@@ -81,6 +81,9 @@
     envlist=xray-envs \
     privileged=yes \
     start-on-boot=yes \
+    restart-policy=always \
+    restart-interval=30s \
+    restart-max-count=0 \
     logging=yes \
     comment="Xray client (VLESS+Reality + hev-socks5-tunnel)"
 

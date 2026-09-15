@@ -1,11 +1,11 @@
 {
-  "_comment": "Домены и IP для принудительного направления через proxy или direct.",
-  "_format": {
-    "proxy_domains": "массив доменов/geosite — через Xray",
-    "proxy_ips": "массив IP/подсетей — через Xray",
-    "direct_domains": "массив доменов — напрямую (через L2TP)",
-    "direct_ips": "массив IP — напрямую"
-  },
+  "_comment": "Домены и IP для принудительной маршрутизации через proxy или direct.",
+  "_usage": [
+    "Формат domain: domain:example.com (включает поддомены)",
+    "Также можно geosite:xxx — например geosite:netflix",
+    "IP: подсеть или одиночный адрес — 1.2.3.4/32, 10.0.0.0/8",
+    "После правки файла: /container/stop xray-client; /container/start xray-client"
+  ],
 
   "proxy_domains": [
     "domain:instagram.com",
@@ -20,9 +20,8 @@
     "domain:scdn.co",
     "domain:openai.com",
     "domain:chatgpt.com",
-    "geosite:netflix",
-    "geosite:spotify",
-    "geosite:discord"
+    "domain:anthropic.com",
+    "domain:claude.ai"
   ],
 
   "proxy_ips": [],
@@ -35,7 +34,9 @@
     "domain:mos.ru",
     "domain:yandex.ru",
     "domain:vk.com",
-    "domain:mail.ru"
+    "domain:mail.ru",
+    "domain:ozon.ru",
+    "domain:wildberries.ru"
   ],
 
   "direct_ips": []
