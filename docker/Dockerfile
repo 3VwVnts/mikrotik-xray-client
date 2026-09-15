@@ -6,7 +6,7 @@ FROM alpine:3.21 AS fetch
 ARG TARGETARCH
 ARG TARGETVARIANT
 ARG XRAY_VERSION=v25.9.11
-ARG TUN2SOCKS_VERSION=v2.5.2
+ARG TUN2SOCKS_VERSION=v2.7.0
 ARG GEODATA_URL="https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download"
 
 RUN apk add --no-cache curl unzip ca-certificates
@@ -37,9 +37,10 @@ RUN set -e; \
       *) echo "Unsupported arch: ${TARGETARCH}${TARGETVARIANT}"; exit 1 ;; \
     esac; \
     echo "Fetching tun2socks ${TUN2SOCKS_VERSION} (${T2S_ARCH})"; \
-    curl -fL -o tun2socks.gz \
-      "https://github.com/xjasonlyu/tun2socks/releases/download/${TUN2SOCKS_VERSION}/tun2socks-linux-${T2S_ARCH}.gz"; \
-    gunzip tun2socks.gz; chmod +x tun2socks
+    curl -fL -o tun2socks.zip \
+      "https://github.com/xjasonlyu/tun2socks/releases/download/${TUN2SOCKS_VERSION}/tun2socks-linux-${T2S_ARCH}.zip"; \
+    unzip tun2socks.zip; \
+    chmod +x tun2socks
 
 # --- GeoIP / GeoSite (baked-in fallback) ---
 RUN curl -fL -o geoip.dat   "${GEODATA_URL}/geoip.dat" && \
