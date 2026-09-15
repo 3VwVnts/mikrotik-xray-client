@@ -1,0 +1,78 @@
+# ============ Secrets / environment ============
+.env
+.env.*
+!.env.example
+config.json
+docker/config.json
+custom-rules.json
+*.rsc.bak
+*.backup
+
+# ============ macOS ============
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+.fseventsd
+.AppleDouble
+.LSOverride
+.DocumentRevisions-V100
+.TemporaryItems
+.apdisk
+Icon?
+Network Trash Folder
+Temporary Items
+
+# ============ Linux ============
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+.nfs*
+*.swp
+*.swo
+core
+core.*
+.cache/
+.pytest_cache/
+.mypy_cache/
+__pycache__/
+*.py[cod]
+
+# ============ Windows ============
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+*.stackdump
+[Dd]esktop.ini
+$RECYCLE.BIN/
+*.cab
+*.msi
+*.msm
+*.msp
+*.lnk
+
+# ============ Editors / IDE ============
+.vscode/
+!.vscode/extensions.json
+.idea/
+*.sublime-*
+*.code-workspace
+.project
+.classpath
+*.komodoproject
+
+# ============ Build / logs / temp ============
+/dist/
+/build/
+/out/
+*.log
+logs/
+tmp/
+temp/
+
+# ============ GitHub Actions local ============
+.actrc
+.act/

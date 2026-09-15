@@ -1,0 +1,99 @@
+name: Watch upstream deps
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read current versions
+        id: current
+        run: |
+          XRAY=$(grep -oP 'ARG XRAY_VERSION=\K.*' docker/Dockerfile | head -1)
+          T2S=$(grep -oP 'ARG TUN2SOCKS_VERSION=\K.*' docker/Dockerfile | head -1)
+          echo "xray=$XRAY" >> "$GITHUB_OUTPUT"
+          echo "t2s=$T2S"   >> "$GITHUB_OUTPUT"
+          echo "Current: Xray=$XRAY tun2socks=$T2S"
+
+      - name: Query latest releases
+        id: latest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          XRAY=$(gh api repos/XTLS/Xray-core/releases/latest --jq .tag_name)
+          T2S=$(gh api repos/xjasonlyu/tun2socks/releases/latest --jq .tag_name)
+          echo "xray=$XRAY" >> "$GITHUB_OUTPUT"
+          echo "t2s=$T2S"   >> "$GITHUB_OUTPUT"
+          echo "Latest:  Xray=$XRAY tun2socks=$T2S"
+
+      - name: Detect changes
+        id: diff
+        run: |
+          CHANGED=0
+          [ "${{ steps.current.outputs.xray }}" != "${{ steps.latest.outputs.xray }}" ] && CHANGED=1
+          [ "${{ steps.current.outputs.t2s }}"  != "${{ steps.latest.outputs.t2s }}"  ] && CHANGED=1
+          echo "changed=$CHANGED" >> "$GITHUB_OUTPUT"
+
+      - name: Apply updates
+        if: steps.diff.outputs.changed == '1'
+        env:
+          NEW_XRAY: ${{ steps.latest.outputs.xray }}
+          NEW_T2S: ${{ steps.latest.outputs.t2s }}
+          OLD_XRAY: ${{ steps.current.outputs.xray }}
+          OLD_T2S: ${{ steps.current.outputs.t2s }}
+        run: |
+          sed -i "s|ARG XRAY_VERSION=.*|ARG XRAY_VERSION=${NEW_XRAY}|"           docker/Dockerfile
+          sed -i "s|ARG TUN2SOCKS_VERSION=.*|ARG TUN2SOCKS_VERSION=${NEW_T2S}|" docker/Dockerfile
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          echo "NEW_XRAY=$NEW_XRAY" >> "$GITHUB_ENV"
+          echo "NEW_T2S=$NEW_T2S"   >> "$GITHUB_ENV"
+          echo "OLD_XRAY=$OLD_XRAY" >> "$GITHUB_ENV"
+          echo "OLD_T2S=$OLD_T2S"   >> "$GITHUB_ENV"
+
+      - name: Create PR
+        if: steps.diff.outputs.changed == '1'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          BRANCH="chore/bump-deps-$(date +%Y%m%d)"
+          git checkout -b "$BRANCH"
+
+          BODY=$(cat <<EOF
+          Автоматическое обновление upstream-зависимостей.
+
+          | Компонент | Было | Стало |
+          |---|---|---|
+          | Xray-core | \`${OLD_XRAY}\` | \`${NEW_XRAY}\` |
+          | tun2socks | \`${OLD_T2S}\` | \`${NEW_T2S}\` |
+
+          **Что проверить перед мержем:**
+          - [ ] Changelog Xray-core: https://github.com/XTLS/Xray-core/releases/tag/${NEW_XRAY}
+          - [ ] Changelog tun2socks: https://github.com/xjasonlyu/tun2socks/releases/tag/${NEW_T2S}
+          - [ ] Дождаться зелёного smoke-test (armv7) в CI
+          - [ ] После мержа — собрать релиз тегом \`vX.Y.Z\`
+
+          После мержа в \`main\` workflow \`build.yml\` соберёт \`latest\` и прогонит smoke-test.
+          EOF
+          )
+
+          git add docker/Dockerfile
+          git commit -m "chore(deps): bump Xray-core ${OLD_XRAY}→${NEW_XRAY}, tun2socks ${OLD_T2S}→${NEW_T2S}"
+          git push origin "$BRANCH"
+
+          gh pr create \
+            --title "chore(deps): Xray ${NEW_XRAY}, tun2socks ${NEW_T2S}" \
+            --body "$BODY" \
+            --base main \
+            --head "$BRANCH"

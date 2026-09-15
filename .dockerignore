@@ -1,0 +1,36 @@
+# VCS & CI
+.git
+.gitignore
+.github
+
+# Документация
+README.md
+LICENSE
+CHANGELOG.md
+docs/
+
+# MikroTik-скрипты
+scripts/
+*.rsc
+
+# Секреты
+.env
+.env.*
+config.json
+custom-rules.json
+*.bak
+
+# ОС-мусор
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Логи и временное
+*.log
+logs/
+tmp/
+temp/
+
+# Прочее
+docker-compose*.yml
+Makefile
