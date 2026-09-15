@@ -274,19 +274,20 @@ sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
 sysctl -w net.ipv4.conf.all.rp_filter=0 >/dev/null 2>&1 || true
 sysctl -w net.ipv4.conf.default.rp_filter=0 >/dev/null 2>&1 || true
 
-# --- Удаляем stale tun0 (если остался от прошлого запуска) ---
+# --- ФИКС: права на /dev/net/tun для RouterOS 7.22+ ---
+log "Ensuring /dev/net/tun is writable"
+ls -la /dev/net/tun 2>/dev/null || log "  /dev/net/tun not found"
+chmod 666 /dev/net/tun 2>/dev/null || log "  chmod failed (may already be correct)"
+ls -la /dev/net/tun 2>/dev/null
+
+# --- Удаляем stale tun0 ---
 if ip link show "$TUN_DEV" >/dev/null 2>&1; then
   log "Removing stale $TUN_DEV"
   ip link delete "$TUN_DEV" 2>/dev/null || true
   sleep 1
 fi
 
-# --- Проверка бинарника hev ---
-log "Checking hev-socks5-tunnel binary"
-ls -la /usr/local/bin/hev-socks5-tunnel || die "hev-socks5-tunnel not found"
-/usr/local/bin/hev-socks5-tunnel --help 2>&1 | head -5 || log "  --help exit: $?"
-
-# --- Минимальный конфиг hev (как в рабочем byedpi) ---
+# --- Конфиг hev ---
 mkdir -p "$(dirname "$HEV_CONFIG")"
 cat > "$HEV_CONFIG" <<EOF
 tunnel:
@@ -324,24 +325,6 @@ log "Starting hev-socks5-tunnel → socks5://127.0.0.1:$SOCKS_PORT"
 HEV_PID=$!
 log "hev-socks5-tunnel launched, PID=$HEV_PID"
 
-# Даём 2 секунды и смотрим, что он жив и что пишет в лог
-sleep 2
-if kill -0 "$HEV_PID" 2>/dev/null; then
-  log "hev PID=$HEV_PID: ALIVE"
-  log "hev log (first 20 lines):"
-  head -20 "$HEV_LOG" 2>&1 || log "  (log empty or unreadable)"
-else
-  EXIT_CODE=$(wait "$HEV_PID" 2>/dev/null; echo $?)
-  log "hev PID=$HEV_PID: DEAD (exit=$EXIT_CODE)"
-  log "hev log content:"
-  cat "$HEV_LOG" 2>&1 || log "  (log empty or unreadable)"
-  if [ "$DEBUG_HOLD" = "1" ]; then
-    log "DEBUG_HOLD=1: sleeping 600s"
-    sleep 600
-  fi
-  die "hev-socks5-tunnel died"
-fi
-
 # --- 3. Ждём tun0 ---
 TUN_WAIT=0
 TUN_MAX_WAIT=15
@@ -353,7 +336,6 @@ while [ "$TUN_WAIT" -lt "$TUN_MAX_WAIT" ]; do
   if ! kill -0 "$HEV_PID" 2>/dev/null; then
     EXIT_CODE=$(wait "$HEV_PID" 2>/dev/null; echo $?)
     log "[ERROR] hev died during wait (exit=$EXIT_CODE)"
-    log "[ERROR] hev log:"
     cat "$HEV_LOG" 2>&1 || true
     if [ "$DEBUG_HOLD" = "1" ]; then
       log "DEBUG_HOLD=1: sleeping 600s"
@@ -368,9 +350,7 @@ done
 if ! ip link show "$TUN_DEV" 2>/dev/null | grep -q "state UP"; then
   log "[ERROR] $TUN_DEV did not come up within ${TUN_MAX_WAIT}s"
   log "[ERROR] hev PID=$HEV_PID still alive? $(kill -0 $HEV_PID 2>/dev/null && echo yes || echo no)"
-  log "[ERROR] Interface list:"
-  ip -br link show
-  log "[ERROR] hev log content:"
+  log "[ERROR] hev log:"
   cat "$HEV_LOG" 2>&1 || true
   if [ "$DEBUG_HOLD" = "1" ]; then
     log "DEBUG_HOLD=1: sleeping 600s"
