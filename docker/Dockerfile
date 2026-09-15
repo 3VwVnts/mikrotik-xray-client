@@ -1,7 +1,7 @@
 # =========================================================
 # Stage 1: fetch static binaries
 # =========================================================
-FROM alpine:3.21 AS fetch
+FROM alpine:3.24 AS fetch
 
 ARG TARGETARCH
 ARG TARGETVARIANT
@@ -49,7 +49,7 @@ RUN curl -fL -o geoip.dat   "${GEODATA_URL}/geoip.dat" && \
 # =========================================================
 # Stage 2: final image
 # =========================================================
-FROM alpine:3.21
+FROM alpine:3.24
 
 RUN apk add --no-cache \
       ca-certificates \
