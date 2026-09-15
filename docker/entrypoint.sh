@@ -5,14 +5,17 @@ set -e
 # ENV
 # ============================================================
 VLESS_URI="${VLESS_URI:-}"
-PROXY_MODE="${PROXY_MODE:-tun2socks}"
-LOG_LEVEL="${LOG_LEVEL:-warning}"
+PROXY_MODE="${PROXY_MODE:-hev-tunnel}"
+LOG_LEVEL="${LOG_LEVEL:-info}"
 TUN_DEV="${TUN_DEV:-tun0}"
-TUN_ADDR="${TUN_ADDR:-198.18.0.1/15}"
+TUN_IPV4="${TUN_IPV4:-198.18.0.1}"
+TUN_IPV6="${TUN_IPV6:-fc00::1}"
+TUN_MTU="${TUN_MTU:-8500}"
 SOCKS_PORT="${SOCKS_PORT:-10808}"
 HTTP_PORT="${HTTP_PORT:-10809}"
 CUSTOM_RULES_FILE="${CUSTOM_RULES_FILE:-/etc/xray/custom-rules.json}"
 CONFIG_FILE="${XRAY_LOCATION_CONFIG:-/etc/xray/config.json}"
+HEV_CONFIG="/etc/xray/hev-tunnel.yml"
 GEO_CACHE_DIR="${GEO_CACHE_DIR:-/var/lib/xray/geo}"
 GEO_MAX_AGE_DAYS="${GEO_MAX_AGE_DAYS:-3}"
 GEO_FORCE_UPDATE="${GEO_FORCE_UPDATE:-0}"
@@ -20,6 +23,7 @@ GEO_SKIP_DOWNLOAD="${GEO_SKIP_DOWNLOAD:-0}"
 DEBUG_HOLD="${DEBUG_HOLD:-0}"
 GEODATA_URL="https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download"
 XRAY_MARK=255
+TUN_TABLE=20
 
 log() { echo "[entrypoint] $*"; }
 die() { echo "[entrypoint][ERROR] $*" >&2; exit 1; }
@@ -185,7 +189,9 @@ ALL_RULES=$(jq -n \
   --argjson f "$FINAL_RULES" '$b + $c + $f')
 
 # ============================================================
-# Generate config.json
+# Generate Xray config.json
+# ВАЖНО: и proxy, и direct outbounds маркируются fwmark=255,
+# чтобы их трафик шёл через main table (обход tun0).
 # ============================================================
 mkdir -p "$(dirname "$CONFIG_FILE")"
 
@@ -225,6 +231,7 @@ jq -n \
       streamSettings: {
         network: "tcp",
         security: "reality",
+        sockopt: { mark: $mark },
         realitySettings: {
           serverName: $sni, fingerprint: $fp,
           publicKey: $pbk, shortId: $sid, spiderX: "/"
@@ -248,9 +255,9 @@ jq -n \
   }
 }' > "$CONFIG_FILE"
 
-log "Config written: $CONFIG_FILE"
+log "Xray config written: $CONFIG_FILE"
 xray run -test -c "$CONFIG_FILE" || die "Xray config test failed"
-log "Config test OK"
+log "Xray config test OK"
 
 # ============================================================
 # SOCKS-only mode
@@ -261,128 +268,113 @@ if [ "$PROXY_MODE" = "socks-only" ]; then
 fi
 
 # ============================================================
-# tun2socks mode
+# hev-socks5-tunnel mode
 # ============================================================
-log "Setting up TUN $TUN_DEV"
+log "=== hev-socks5-tunnel mode ==="
+
+# --- Sysctl ---
 sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
 sysctl -w net.ipv4.conf.all.rp_filter=0 >/dev/null 2>&1 || true
 sysctl -w net.ipv4.conf.default.rp_filter=0 >/dev/null 2>&1 || true
 
-# --- Нормализация ip rule для RouterOS 7.22+ ---
-log "Normalizing ip rule priorities (RouterOS 7.22+ fix)"
-while ip rule show | grep -Eq '^1:\s+from all lookup local'; do
-  ip rule del pref 1 2>/dev/null || break
-done
-while ip rule show | grep -Eq '^2:\s+from all lookup main'; do
-  ip rule del pref 2 2>/dev/null || break
-done
-while ip rule show | grep -Eq '^3:\s+from all lookup default'; do
-  ip rule del pref 3 2>/dev/null || break
-done
-ip rule add pref 200 from all lookup local 2>/dev/null || true
-ip rule add pref 2147483646 from all lookup main 2>/dev/null || true
-ip rule add pref 2147483647 from all lookup default 2>/dev/null || true
+# --- Генерируем YAML-конфиг для hev-socks5-tunnel ---
+mkdir -p "$(dirname "$HEV_CONFIG")"
+cat > "$HEV_CONFIG" <<EOF
+tunnel:
+  name: ${TUN_DEV}
+  mtu: ${TUN_MTU}
+  multi-queue: false
+  ipv4: ${TUN_IPV4}
+  ipv6: '${TUN_IPV6}'
+  icmp: 'reply'
 
-# --- Автодетект внешнего интерфейса (veth-xray в MikroTik) ---
-ETH_DEV=$(ip -o -4 addr show | awk '$4 ~ /^172\.17\./ {print $2; exit}' | sed 's/@.*//')
-if [ -z "$ETH_DEV" ]; then
-  ETH_DEV=$(ip -o link show | awk -F': ' '$2!="lo" && $2!~/^tun/ {print $2; exit}' | sed 's/@.*//')
-fi
-[ -n "$ETH_DEV" ] || die "Cannot detect external interface"
-log "External interface: $ETH_DEV"
+socks5:
+  port: ${SOCKS_PORT}
+  address: 127.0.0.1
+  udp: 'udp'
+  mark: ${XRAY_MARK}
 
-# --- Автодетект шлюза ---
-HOST_GW=$(ip route show default 2>/dev/null | awk '/default/ {print $3; exit}')
-[ -n "$HOST_GW" ] || die "Cannot detect host gateway"
-log "Host gateway: $HOST_GW"
+misc:
+  log-level: ${LOG_LEVEL}
+  task-stack-size: 86016
+  tcp-buffer-size: 65536
+  udp-recv-buffer-size: 524288
+  udp-copy-buffer-nums: 10
+  connect-timeout: 10000
+  tcp-read-write-timeout: 300000
+  udp-read-write-timeout: 60000
+EOF
 
-# --- Резолвим VPS IP (до смены default route) ---
-VPS_IP=$(getent ahostsv4 "$SERVER" 2>/dev/null | awk 'NR==1{print $1}')
-[ -n "$VPS_IP" ] || VPS_IP="$SERVER"
-log "VPS IP: $VPS_IP"
+log "hev-tunnel config written: $HEV_CONFIG"
+cat "$HEV_CONFIG"
 
-# --- Policy routing: fwmark 255 → table 100 ---
-log "Configuring policy routing (fwmark=$XRAY_MARK → table 100)"
-ip rule del fwmark "$XRAY_MARK" lookup 100 2>/dev/null || true
-ip rule add fwmark "$XRAY_MARK" lookup 100 priority 100
+# --- Policy routing: Xray (fwmark=255) → main, остальное → tun0 ---
+log "Configuring policy routing"
+log "  fwmark $XRAY_MARK → main table (bypass tunnel for Xray)"
+log "  default → table $TUN_TABLE → $TUN_DEV"
 
-# Таблица 100 должна знать, как достичь шлюза 172.17.0.1
-ip route replace 172.17.0.0/24 dev "$ETH_DEV" scope link table 100
-ip route replace default via "$HOST_GW" dev "$ETH_DEV" onlink table 100
-log "  table 100 configured"
+# Убираем возможные старые правила от предыдущих запусков
+ip rule del fwmark "$XRAY_MARK" lookup main pref 10 2>/dev/null || true
+ip rule del lookup "$TUN_TABLE" pref 20 2>/dev/null || true
+ip route flush table "$TUN_TABLE" 2>/dev/null || true
 
-# --- Фиксируем маршруты до VPS и LAN в main ---
-log "Pinning routes to VPS and LAN in main table"
-ip route replace "$VPS_IP" via "$HOST_GW" dev "$ETH_DEV" 2>/dev/null || true
-ip route replace 192.168.10.0/24 via "$HOST_GW" dev "$ETH_DEV" 2>/dev/null || true
-ip route replace 10.10.10.0/24 via "$HOST_GW" dev "$ETH_DEV" 2>/dev/null || true
+# Правило 1: Xray-трафик (маркирован) → main → veth-xray → хост
+ip rule add fwmark "$XRAY_MARK" lookup main pref 10
+
+# Правило 2: всё остальное → table 20 → tun0
+ip route add default dev "$TUN_DEV" table "$TUN_TABLE"
+ip rule add lookup "$TUN_TABLE" pref 20
+
+log "Routing rules configured"
 
 # --- Запускаем Xray ---
 log "Starting Xray"
 xray run -c "$CONFIG_FILE" &
 XRAY_PID=$!
 sleep 2
-kill -0 "$XRAY_PID" 2>/dev/null || die "Xray process died"
+kill -0 "$XRAY_PID" 2>/dev/null || die "Xray died on start"
 log "Xray started (PID=$XRAY_PID)"
 
-# --- Запускаем tun2socks ---
-# tun2socks сам создаёт TUN и выполняет команды из -tun-post-up
-T2S_LOG=/tmp/tun2socks.log
-log "Starting tun2socks → socks5://127.0.0.1:$SOCKS_PORT"
-tun2socks \
-  -device "tun://$TUN_DEV" \
-  -proxy  "socks5://127.0.0.1:$SOCKS_PORT" \
-  -tun-post-up "ip addr add $TUN_ADDR dev $TUN_DEV && ip link set $TUN_DEV up" \
-  -loglevel info \
-  > "$T2S_LOG" 2>&1 &
-T2S_PID=$!
+# --- Запускаем hev-socks5-tunnel ---
+HEV_LOG=/tmp/hev-tunnel.log
+log "Starting hev-socks5-tunnel → socks5://127.0.0.1:$SOCKS_PORT"
+/usr/local/bin/hev-socks5-tunnel "$HEV_CONFIG" > "$HEV_LOG" 2>&1 &
+HEV_PID=$!
 
-# Даём время на создание TUN и выполнение -tun-post-up
 sleep 4
 
-if ! kill -0 "$T2S_PID" 2>/dev/null; then
-  EXIT_CODE=$(wait "$T2S_PID" 2>/dev/null; echo $?)
-  log "[ERROR] tun2socks died. Exit code: $EXIT_CODE"
-  log "[ERROR] Log file size: $(wc -c < "$T2S_LOG" 2>/dev/null || echo unknown) bytes"
-  log "[ERROR] Log content:"
-  cat "$T2S_LOG" 2>&1 || log "  (cannot read log)"
-  log "[ERROR] End of tun2socks log"
-
+if ! kill -0 "$HEV_PID" 2>/dev/null; then
+  EXIT_CODE=$(wait "$HEV_PID" 2>/dev/null; echo $?)
+  log "[ERROR] hev-socks5-tunnel died. Exit code: $EXIT_CODE"
+  log "[ERROR] Log file: $HEV_LOG"
+  cat "$HEV_LOG" 2>&1 || true
   if [ "$DEBUG_HOLD" = "1" ]; then
-    log "DEBUG_HOLD=1: container will sleep 600s for manual inspection"
-    log "  Connect via: /container/shell xray-client"
+    log "DEBUG_HOLD=1: sleeping 600s"
     sleep 600
   fi
-
-  die "tun2socks died immediately after start"
+  die "hev-socks5-tunnel died"
 fi
-log "tun2socks started (PID=$T2S_PID)"
+log "hev-socks5-tunnel started (PID=$HEV_PID)"
 
-# --- Проверяем, что tun0 UP ---
+# --- Проверяем tun0 ---
 if ip link show "$TUN_DEV" 2>/dev/null | grep -q "state UP"; then
   log "$TUN_DEV is UP"
 else
-  log "WARNING: $TUN_DEV not UP, waiting 3 more seconds"
+  log "WARNING: $TUN_DEV not UP, waiting 3s more"
   sleep 3
-  if ip link show "$TUN_DEV" 2>/dev/null | grep -q "state UP"; then
-    log "$TUN_DEV is UP now"
-  else
-    log "WARNING: $TUN_DEV still not UP:"
-    ip link show "$TUN_DEV" 2>/dev/null || log "  $TUN_DEV does not exist"
-  fi
+  ip link show "$TUN_DEV" 2>/dev/null || log "  $TUN_DEV does not exist"
 fi
 
-# --- Меняем default route на tun0 ---
-ip route replace default dev "$TUN_DEV"
-log "Default route → $TUN_DEV"
-
-log "=== Routes ==="
+log "=== Routes (main) ==="
 ip route show
+log "=== Routes (table $TUN_TABLE) ==="
+ip route show table "$TUN_TABLE"
 log "=== Rules ==="
 ip rule show
 log "=== Interfaces ==="
 ip -br link show
+log "=== hev-tunnel log tail ==="
+tail -30 "$HEV_LOG" 2>/dev/null || true
 
-# --- Signal handling ---
-trap 'log "Stopping..."; kill $T2S_PID $XRAY_PID 2>/dev/null; wait; exit 0' TERM INT
-wait $XRAY_PID $T2S_PID
+trap 'log "Stopping..."; kill $HEV_PID $XRAY_PID 2>/dev/null; wait; exit 0' TERM INT
+wait $XRAY_PID $HEV_PID

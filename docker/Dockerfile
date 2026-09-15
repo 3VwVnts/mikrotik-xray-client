@@ -1,19 +1,36 @@
+# syntax=docker/dockerfile:1
+
 # =========================================================
-# Stage 1: fetch static binaries
+# Stage 1: hev-socks5-tunnel
 # =========================================================
-FROM alpine:3.24 AS fetch
+FROM alpine:3.21 AS hev
+
+ARG HEV_VERSION="2.17.1"
+
+RUN apk add --no-cache \
+    git make gcc musl-dev linux-headers
+
+WORKDIR /src
+
+RUN git clone --depth 1 --branch "${HEV_VERSION}" --recursive \
+        https://github.com/heiher/hev-socks5-tunnel . \
+    && make ENABLE_STATIC=1 \
+    && strip bin/hev-socks5-tunnel
+
+# =========================================================
+# Stage 2: Xray-core + geo data
+# =========================================================
+FROM alpine:3.21 AS fetch
 
 ARG TARGETARCH
 ARG TARGETVARIANT
-ARG XRAY_VERSION=v25.9.11
-ARG TUN2SOCKS_VERSION=v2.7.0
+ARG XRAY_VERSION=v26.3.27
 ARG GEODATA_URL="https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download"
 
 RUN apk add --no-cache curl unzip ca-certificates
 
 WORKDIR /tmp
 
-# --- Xray-core (official static binary) ---
 RUN set -e; \
     case "${TARGETARCH}${TARGETVARIANT}" in \
       amd64)  XRAY_ARCH="64" ;; \
@@ -25,47 +42,25 @@ RUN set -e; \
     echo "Fetching Xray ${XRAY_VERSION} (${XRAY_ARCH})"; \
     curl -fL -o xray.zip \
       "https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}/Xray-linux-${XRAY_ARCH}.zip"; \
-    unzip -o xray.zip xray; \
-    chmod +x xray
+    unzip -o xray.zip xray; chmod +x xray
 
-# --- tun2socks (xjasonlyu, static Go, ZIP archives) ---
-RUN set -e; \
-    case "${TARGETARCH}${TARGETVARIANT}" in \
-      amd64)  T2S_ARCH="amd64" ;; \
-      arm64)  T2S_ARCH="arm64" ;; \
-      armv7)  T2S_ARCH="armv7" ;; \
-      armv6)  T2S_ARCH="armv6" ;; \
-      *) echo "Unsupported arch: ${TARGETARCH}${TARGETVARIANT}"; exit 1 ;; \
-    esac; \
-    echo "Fetching tun2socks ${TUN2SOCKS_VERSION} (${T2S_ARCH})"; \
-    curl -fL -o tun2socks.zip \
-      "https://github.com/xjasonlyu/tun2socks/releases/download/${TUN2SOCKS_VERSION}/tun2socks-linux-${T2S_ARCH}.zip"; \
-    echo "--- Archive contents ---"; \
-    unzip -l tun2socks.zip; \
-    echo "--- Extracting ---"; \
-    unzip -o -j tun2socks.zip "tun2socks-linux-${T2S_ARCH}"; \
-    mv "tun2socks-linux-${T2S_ARCH}" tun2socks; \
-    chmod +x tun2socks; \
-    ls -la tun2socks
-
-# --- GeoIP / GeoSite (baked-in fallback) ---
 RUN curl -fL -o geoip.dat   "${GEODATA_URL}/geoip.dat" && \
     curl -fL -o geosite.dat "${GEODATA_URL}/geosite.dat"
 
 # =========================================================
-# Stage 2: final image
+# Stage 3: final image
 # =========================================================
-FROM alpine:3.24
+FROM alpine:3.21
 
 RUN apk add --no-cache \
-      ca-certificates \
-      iproute2 \
-      jq \
-      tzdata \
-      curl
+    ca-certificates \
+    iproute2 \
+    jq \
+    tzdata \
+    curl
 
-COPY --from=fetch /tmp/xray        /usr/local/bin/xray
-COPY --from=fetch /tmp/tun2socks   /usr/local/bin/tun2socks
+COPY --from=hev   /src/bin/hev-socks5-tunnel /usr/local/bin/hev-socks5-tunnel
+COPY --from=fetch /tmp/xray                  /usr/local/bin/xray
 
 RUN mkdir -p /usr/local/share/xray
 COPY --from=fetch /tmp/geoip.dat   /usr/local/share/xray/geoip.dat
