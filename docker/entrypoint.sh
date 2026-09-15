@@ -330,6 +330,31 @@ sleep 2
 kill -0 "$XRAY_PID" 2>/dev/null || die "Xray process died"
 log "Xray started (PID=$XRAY_PID)"
 
+# --- ДИАГНОСТИКА tun2socks ---
+log "=== tun2socks binary diagnostics ==="
+if [ -f /usr/local/bin/tun2socks ]; then
+  log "  file exists"
+  ls -la /usr/local/bin/tun2socks 2>&1 || true
+  if [ -x /usr/local/bin/tun2socks ]; then
+    log "  executable: YES"
+  else
+    log "  executable: NO — chmod +x"
+  fi
+else
+  log "  file MISSING at /usr/local/bin/tun2socks"
+fi
+
+log "=== tun2socks --version ==="
+/usr/local/bin/tun2socks --version 2>&1 || log "  --version exit code: $?"
+
+log "=== tun2socks --help (first 30 lines) ==="
+/usr/local/bin/tun2socks --help 2>&1 | head -30 || log "  --help exit code: $?"
+
+log "=== /dev/net/tun ==="
+ls -la /dev/net/ 2>&1 || log "  /dev/net missing"
+
+log "=== End diagnostics ==="
+
 # --- Запускаем tun2socks ---
 T2S_LOG=/tmp/tun2socks.log
 log "Starting tun2socks → socks5://127.0.0.1:$SOCKS_PORT"
@@ -343,21 +368,22 @@ T2S_PID=$!
 
 sleep 3
 if ! kill -0 "$T2S_PID" 2>/dev/null; then
-  log "[ERROR] tun2socks died. Log output:"
-  cat "$T2S_LOG"
+  EXIT_CODE=$(wait "$T2S_PID" 2>/dev/null; echo $?)
+  log "[ERROR] tun2socks died. Exit code: $EXIT_CODE"
+  log "[ERROR] Log file size: $(wc -c < "$T2S_LOG" 2>/dev/null || echo unknown) bytes"
+  log "[ERROR] Log content:"
+  cat "$T2S_LOG" 2>&1 || log "  (cannot read log)"
   log "[ERROR] End of tun2socks log"
+
+  if [ "${DEBUG_HOLD:-0}" = "1" ]; then
+    log "DEBUG_HOLD=1: container will sleep 600s for manual inspection"
+    log "  Connect via: /container/shell xray-client"
+    sleep 600
+  fi
+
   die "tun2socks died immediately after start"
 fi
 log "tun2socks started (PID=$T2S_PID)"
-
-# --- Проверяем tun0 ---
-sleep 2
-if ip link show "$TUN_DEV" 2>/dev/null | grep -q "state UP"; then
-  log "$TUN_DEV is UP"
-else
-  log "WARNING: $TUN_DEV state:"
-  ip link show "$TUN_DEV" 2>/dev/null || log "  $TUN_DEV does not exist"
-fi
 
 # --- Меняем default route на tun0 ---
 ip route replace default dev "$TUN_DEV"
