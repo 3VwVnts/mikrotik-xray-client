@@ -274,6 +274,19 @@ sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
 sysctl -w net.ipv4.conf.all.rp_filter=0 >/dev/null 2>&1 || true
 sysctl -w net.ipv4.conf.default.rp_filter=0 >/dev/null 2>&1 || true
 
+# --- Удаляем stale tun0 (если остался от прошлого запуска) ---
+if ip link show "$TUN_DEV" >/dev/null 2>&1; then
+  log "Removing stale $TUN_DEV"
+  ip link delete "$TUN_DEV" 2>/dev/null || true
+  sleep 1
+fi
+
+# --- Проверка бинарника hev ---
+log "Checking hev-socks5-tunnel binary"
+ls -la /usr/local/bin/hev-socks5-tunnel || die "hev-socks5-tunnel not found"
+/usr/local/bin/hev-socks5-tunnel --help 2>&1 | head -5 || log "  --help exit: $?"
+
+# --- Минимальный конфиг hev (как в рабочем byedpi) ---
 mkdir -p "$(dirname "$HEV_CONFIG")"
 cat > "$HEV_CONFIG" <<EOF
 tunnel:
@@ -282,26 +295,18 @@ tunnel:
   multi-queue: false
   ipv4: ${TUN_IPV4}
   ipv6: '${TUN_IPV6}'
-  icmp: 'reply'
+  icmp: 'off'
 
 socks5:
   port: ${SOCKS_PORT}
   address: 127.0.0.1
   udp: 'udp'
-  mark: ${XRAY_MARK}
 
 misc:
   log-level: ${LOG_LEVEL}
-  task-stack-size: 86016
-  tcp-buffer-size: 65536
-  udp-recv-buffer-size: 524288
-  udp-copy-buffer-nums: 10
-  connect-timeout: 10000
-  tcp-read-write-timeout: 300000
-  udp-read-write-timeout: 60000
 EOF
 
-log "hev-tunnel config written: $HEV_CONFIG"
+log "hev-tunnel config:"
 cat "$HEV_CONFIG"
 
 # --- 1. Xray ---
@@ -312,13 +317,32 @@ sleep 2
 kill -0 "$XRAY_PID" 2>/dev/null || die "Xray died on start"
 log "Xray started (PID=$XRAY_PID)"
 
-# --- 2. hev-socks5-tunnel (создаёт tun0) ---
+# --- 2. hev-socks5-tunnel ---
 HEV_LOG=/tmp/hev-tunnel.log
 log "Starting hev-socks5-tunnel → socks5://127.0.0.1:$SOCKS_PORT"
 /usr/local/bin/hev-socks5-tunnel "$HEV_CONFIG" > "$HEV_LOG" 2>&1 &
 HEV_PID=$!
+log "hev-socks5-tunnel launched, PID=$HEV_PID"
 
-# --- 3. Ждём tun0 UP ---
+# Даём 2 секунды и смотрим, что он жив и что пишет в лог
+sleep 2
+if kill -0 "$HEV_PID" 2>/dev/null; then
+  log "hev PID=$HEV_PID: ALIVE"
+  log "hev log (first 20 lines):"
+  head -20 "$HEV_LOG" 2>&1 || log "  (log empty or unreadable)"
+else
+  EXIT_CODE=$(wait "$HEV_PID" 2>/dev/null; echo $?)
+  log "hev PID=$HEV_PID: DEAD (exit=$EXIT_CODE)"
+  log "hev log content:"
+  cat "$HEV_LOG" 2>&1 || log "  (log empty or unreadable)"
+  if [ "$DEBUG_HOLD" = "1" ]; then
+    log "DEBUG_HOLD=1: sleeping 600s"
+    sleep 600
+  fi
+  die "hev-socks5-tunnel died"
+fi
+
+# --- 3. Ждём tun0 ---
 TUN_WAIT=0
 TUN_MAX_WAIT=15
 while [ "$TUN_WAIT" -lt "$TUN_MAX_WAIT" ]; do
@@ -328,8 +352,8 @@ while [ "$TUN_WAIT" -lt "$TUN_MAX_WAIT" ]; do
   fi
   if ! kill -0 "$HEV_PID" 2>/dev/null; then
     EXIT_CODE=$(wait "$HEV_PID" 2>/dev/null; echo $?)
-    log "[ERROR] hev-socks5-tunnel died. Exit code: $EXIT_CODE"
-    log "[ERROR] Log file: $HEV_LOG"
+    log "[ERROR] hev died during wait (exit=$EXIT_CODE)"
+    log "[ERROR] hev log:"
     cat "$HEV_LOG" 2>&1 || true
     if [ "$DEBUG_HOLD" = "1" ]; then
       log "DEBUG_HOLD=1: sleeping 600s"
@@ -343,18 +367,22 @@ done
 
 if ! ip link show "$TUN_DEV" 2>/dev/null | grep -q "state UP"; then
   log "[ERROR] $TUN_DEV did not come up within ${TUN_MAX_WAIT}s"
-  log "[ERROR] hev log:"
+  log "[ERROR] hev PID=$HEV_PID still alive? $(kill -0 $HEV_PID 2>/dev/null && echo yes || echo no)"
+  log "[ERROR] Interface list:"
+  ip -br link show
+  log "[ERROR] hev log content:"
   cat "$HEV_LOG" 2>&1 || true
+  if [ "$DEBUG_HOLD" = "1" ]; then
+    log "DEBUG_HOLD=1: sleeping 600s"
+    sleep 600
+  fi
   die "$TUN_DEV failed to come up"
 fi
 
 log "hev-socks5-tunnel running (PID=$HEV_PID)"
 
-# --- 4. Policy routing (tun0 уже существует) ---
+# --- 4. Policy routing ---
 log "Configuring policy routing"
-log "  fwmark $XRAY_MARK → main table"
-log "  default → table $TUN_TABLE → $TUN_DEV"
-
 ip rule del fwmark "$XRAY_MARK" lookup main pref 10 2>/dev/null || true
 ip rule del lookup "$TUN_TABLE" pref 20 2>/dev/null || true
 ip route flush table "$TUN_TABLE" 2>/dev/null || true
