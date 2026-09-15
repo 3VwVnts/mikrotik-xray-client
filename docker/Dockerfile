@@ -25,9 +25,10 @@ RUN set -e; \
     echo "Fetching Xray ${XRAY_VERSION} (${XRAY_ARCH})"; \
     curl -fL -o xray.zip \
       "https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}/Xray-linux-${XRAY_ARCH}.zip"; \
-    unzip xray.zip xray; chmod +x xray
+    unzip -o xray.zip xray; \
+    chmod +x xray
 
-# --- tun2socks (xjasonlyu, static Go) ---
+# --- tun2socks (xjasonlyu, static Go, ZIP archives) ---
 RUN set -e; \
     case "${TARGETARCH}${TARGETVARIANT}" in \
       amd64)  T2S_ARCH="amd64" ;; \
@@ -39,8 +40,13 @@ RUN set -e; \
     echo "Fetching tun2socks ${TUN2SOCKS_VERSION} (${T2S_ARCH})"; \
     curl -fL -o tun2socks.zip \
       "https://github.com/xjasonlyu/tun2socks/releases/download/${TUN2SOCKS_VERSION}/tun2socks-linux-${T2S_ARCH}.zip"; \
-    unzip tun2socks.zip; \
-    chmod +x tun2socks
+    echo "--- Archive contents ---"; \
+    unzip -l tun2socks.zip; \
+    echo "--- Extracting ---"; \
+    unzip -o -j tun2socks.zip "tun2socks-linux-${T2S_ARCH}"; \
+    mv "tun2socks-linux-${T2S_ARCH}" tun2socks; \
+    chmod +x tun2socks; \
+    ls -la tun2socks
 
 # --- GeoIP / GeoSite (baked-in fallback) ---
 RUN curl -fL -o geoip.dat   "${GEODATA_URL}/geoip.dat" && \
