@@ -52,7 +52,7 @@ jobs:
 
       # ---------- 1. Multiarch сборка ----------
       - name: Build and push multiarch
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: docker/Dockerfile
@@ -65,7 +65,7 @@ jobs:
 
       # ---------- 2. Smoke-test на ARMv7 ----------
       - name: Build armv7 image for testing
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: docker/Dockerfile
