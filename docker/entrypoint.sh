@@ -274,11 +274,15 @@ sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
 sysctl -w net.ipv4.conf.all.rp_filter=0 >/dev/null 2>&1 || true
 sysctl -w net.ipv4.conf.default.rp_filter=0 >/dev/null 2>&1 || true
 
-# --- ФИКС: права на /dev/net/tun для RouterOS 7.22+ ---
+# --- Права на /dev/net/tun (на RouterOS его нет — создаём) ---
+if [ ! -c /dev/net/tun ]; then
+  mkdir -p /dev/net
+  mknod /dev/net/tun c 10 200 2>/dev/null || log "WARNING: mknod failed"
+  chmod 666 /dev/net/tun 2>/dev/null || true
+fi
 log "Ensuring /dev/net/tun is writable"
-ls -la /dev/net/tun 2>/dev/null || log "  /dev/net/tun not found"
 chmod 666 /dev/net/tun 2>/dev/null || log "  chmod failed (may already be correct)"
-ls -la /dev/net/tun 2>/dev/null
+ls -la /dev/net/tun 2>/dev/null || log "  /dev/net/tun not found"
 
 # --- Удаляем stale tun0 ---
 if ip link show "$TUN_DEV" >/dev/null 2>&1; then
@@ -307,8 +311,7 @@ misc:
   log-level: ${LOG_LEVEL}
 EOF
 
-log "hev-tunnel config:"
-cat "$HEV_CONFIG"
+log "hev-tunnel config written: $HEV_CONFIG"
 
 # --- 1. Xray ---
 log "Starting Xray"
@@ -320,12 +323,13 @@ log "Xray started (PID=$XRAY_PID)"
 
 # --- 2. hev-socks5-tunnel ---
 HEV_LOG=/tmp/hev-tunnel.log
-log "Starting hev-socks5-tunnel → socks5://127.0.0.1:$SOCKS_PORT"
+log "Starting hev-socks5-tunnel -> socks5://127.0.0.1:$SOCKS_PORT"
 /usr/local/bin/hev-socks5-tunnel "$HEV_CONFIG" > "$HEV_LOG" 2>&1 &
 HEV_PID=$!
 log "hev-socks5-tunnel launched, PID=$HEV_PID"
 
 # --- 3. Ждём tun0 ---
+# ВАЖНО: TUN-интерфейсы всегда показывают "state UNKNOWN".
 # Признак работающего туннеля — флаг UP внутри <> в выводе ip link.
 tun_is_up() { ip -o link show "$TUN_DEV" 2>/dev/null | grep -q '<[^>]*UP'; }
 
@@ -370,6 +374,22 @@ log "hev-socks5-tunnel running (PID=$HEV_PID)"
 
 # --- 4. Policy routing ---
 log "Configuring policy routing"
+
+# 4a. КРИТИЧНО: RouterOS 7.22+ создаёт lookup local на приоритете 200 —
+# ПОСЛЕ правила "всё в tun0". Из-за этого трафик на 127.0.0.1 (hev<->xray)
+# и DNS уходят в tun0 и умирают в петле. local обязан быть ПЕРВЫМ.
+ip rule add pref 5 from all lookup local 2>/dev/null || true
+ip rule add pref 32766 from all lookup main 2>/dev/null || true
+ip rule add pref 32767 from all lookup default 2>/dev/null || true
+
+# Удаляем "кривые" копии, созданные RouterOS
+for p in 0 1 2 3 200 2147483646 2147483647; do
+  while ip rule show | grep -q "^$p:"; do
+    ip rule del pref "$p" >/dev/null 2>&1 || break
+  done
+done
+
+# 4b. Разводка трафика: xray (mark 255) -> main/veth, всё остальное -> tun0
 ip rule del fwmark "$XRAY_MARK" lookup main pref 10 2>/dev/null || true
 ip rule del lookup "$TUN_TABLE" pref 20 2>/dev/null || true
 ip route flush table "$TUN_TABLE" 2>/dev/null || true
@@ -380,16 +400,15 @@ ip rule add lookup "$TUN_TABLE" pref 20
 
 log "Policy routing configured"
 
-# --- 5. Отчёт ---
-log "=== Routes (main) ==="
-ip route show
-log "=== Routes (table $TUN_TABLE) ==="
-ip route show table "$TUN_TABLE"
+# --- 5. Отчёт (с префиксами — видно в фильтре message~"entrypoint") ---
 log "=== Rules ==="
-ip rule show
+ip rule show | while IFS= read -r line; do log "RL| $line"; done
+log "=== Routes (main) ==="
+ip route show | while IFS= read -r line; do log "RT| $line"; done
+log "=== Routes (table $TUN_TABLE) ==="
+ip route show table "$TUN_TABLE" | while IFS= read -r line; do log "RT| $line"; done
 log "=== Interfaces ==="
-ip -br link show
-log "=== hev-tunnel log tail ==="
+ip -br link show | while IFS= read -r line; do log "IF| $line"; done
 log "=== hev-tunnel log tail ==="
 tail -30 "$HEV_LOG" 2>/dev/null | while IFS= read -r line; do log "HEV| $line"; done
 
