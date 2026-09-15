@@ -151,7 +151,7 @@ log "Parsed: proto=$PROTOCOL server=$SERVER:$PORT sni=$SNI fp=$FP flow=$FLOW"
 BASE_RULES='[
   {"type":"field","outboundTag":"block","domain":["geosite:category-ads-all"]},
   {"type":"field","outboundTag":"direct","domain":["geosite:category-ru","geosite:private"]},
-  {"type":"field","outboundTag":"proxy","domain":["geosite:youtube","geosite:google","geosite:meta","geosite:ru-blocked-all","geosite:openai","geosite:twitter","geosite:telegram","geosite:cloudflare"]},
+  {"type":"field","outboundTag":"proxy","domain":["geosite:youtube","geosite:google","geosite:meta","geosite:openai","geosite:twitter","geosite:telegram","geosite:cloudflare"]},
   {"type":"field","outboundTag":"proxy","port":53}
 ]'
 
