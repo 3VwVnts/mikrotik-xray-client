@@ -264,10 +264,24 @@ fi
 # ============================================================
 log "Setting up TUN $TUN_DEV"
 sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
+sysctl -w net.ipv4.conf.all.rp_filter=0 >/dev/null 2>&1 || true
+sysctl -w net.ipv4.conf.default.rp_filter=0 >/dev/null 2>&1 || true
+
+log "Normalizing ip rule priorities (RouterOS 7.22+ fix)"
+while ip rule show | grep -Eq '^1:\s+from all lookup local'; do
+  ip rule del pref 1 2>/dev/null || break
+done
+while ip rule show | grep -Eq '^2:\s+from all lookup main'; do
+  ip rule del pref 2 2>/dev/null || break
+done
+while ip rule show | grep -Eq '^3:\s+from all lookup default'; do
+  ip rule del pref 3 2>/dev/null || break
+done
+ip rule add pref 200 from all lookup local 2>/dev/null || true
+ip rule add pref 2147483646 from all lookup main 2>/dev/null || true
+ip rule add pref 2147483647 from all lookup default 2>/dev/null || true
 
 # --- Автодетект внешнего интерфейса ---
-# Ищем интерфейс, у которого есть адрес из подсети 172.17.x.x (контейнерная сеть MikroTik).
-# Если не нашли — берём первый не-lo, не-tun.
 ETH_DEV=$(ip -o -4 addr show | awk '$4 ~ /^172\.17\./ {print $2; exit}' | sed 's/@.*//')
 if [ -z "$ETH_DEV" ]; then
   ETH_DEV=$(ip -o link show | awk -F': ' '$2!="lo" && $2!~/^tun/ {print $2; exit}' | sed 's/@.*//')
@@ -275,36 +289,38 @@ fi
 [ -n "$ETH_DEV" ] || die "Cannot detect external interface"
 log "External interface: $ETH_DEV"
 
-# --- Удаляем stale tun0 (если остался от прошлого запуска) ---
-if ip link show "$TUN_DEV" >/dev/null 2>&1; then
-  log "Removing stale $TUN_DEV"
-  ip link delete "$TUN_DEV" 2>/dev/null || true
-  sleep 1
-fi
+# --- Получаем IP и шлюз с этого интерфейса ---
+VETH_IP=$(ip -o -4 addr show dev "$ETH_DEV" | awk '{print $4}' | cut -d/ -f1)
+log "Container IP: $VETH_IP"
 
-# --- Автодетект шлюза ---
 HOST_GW=$(ip route show default 2>/dev/null | awk '/default/ {print $3; exit}')
 [ -n "$HOST_GW" ] || die "Cannot detect host gateway"
 log "Host gateway: $HOST_GW"
 
-# --- Резолвим VPS IP (до смены default route) ---
+# --- Резолвим VPS IP ---
 VPS_IP=$(getent ahostsv4 "$SERVER" 2>/dev/null | awk 'NR==1{print $1}')
 [ -n "$VPS_IP" ] || VPS_IP="$SERVER"
 log "VPS IP: $VPS_IP"
 
-# --- Policy routing: Xray "direct" (mark=255) → таблица 100 → eth ---
+# --- Policy routing: fwmark 255 → table 100 ---
 log "Configuring policy routing (fwmark=$XRAY_MARK → table 100)"
-ip rule del fwmark "$XRAY_MARK" lookup 100 priority 100 2>/dev/null || true
+
+# Правило fwmark
+ip rule del fwmark "$XRAY_MARK" lookup 100 2>/dev/null || true
 ip rule add fwmark "$XRAY_MARK" lookup 100 priority 100
-ip route replace default via "$HOST_GW" dev "$ETH_DEV" table 100
+
+ip route replace 172.17.0.0/24 dev "$ETH_DEV" scope link table 100
+log "  table 100: 172.17.0.0/24 dev $ETH_DEV scope link"
+
+# Теперь default через шлюз
+ip route replace default via "$HOST_GW" dev "$ETH_DEV" onlink table 100
 log "  table 100: default via $HOST_GW dev $ETH_DEV"
 
-# --- Фиксируем маршруты до VPS и локальных подсетей через внешний интерфейс ---
-log "Pinning routes to VPS and LAN"
-ip route replace "$VPS_IP"         via "$HOST_GW" dev "$ETH_DEV" 2>/dev/null || true
-ip route replace 192.168.10.0/24   via "$HOST_GW" dev "$ETH_DEV" 2>/dev/null || true
-ip route replace 10.10.10.0/24     via "$HOST_GW" dev "$ETH_DEV" 2>/dev/null || true
-ip route replace 172.17.0.0/24     via "$HOST_GW" dev "$ETH_DEV" 2>/dev/null || true
+# --- Фиксируем маршруты до VPS и LAN в main ---
+log "Pinning routes to VPS and LAN in main table"
+ip route replace "$VPS_IP" via "$HOST_GW" dev "$ETH_DEV" 2>/dev/null || true
+ip route replace 192.168.10.0/24 via "$HOST_GW" dev "$ETH_DEV" 2>/dev/null || true
+ip route replace 10.10.10.0/24 via "$HOST_GW" dev "$ETH_DEV" 2>/dev/null || true
 
 # --- Запускаем Xray ---
 log "Starting Xray"
@@ -314,7 +330,7 @@ sleep 2
 kill -0 "$XRAY_PID" 2>/dev/null || die "Xray process died"
 log "Xray started (PID=$XRAY_PID)"
 
-# --- Запускаем tun2socks с логированием ---
+# --- Запускаем tun2socks ---
 T2S_LOG=/tmp/tun2socks.log
 log "Starting tun2socks → socks5://127.0.0.1:$SOCKS_PORT"
 tun2socks \
