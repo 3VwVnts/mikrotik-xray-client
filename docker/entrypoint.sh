@@ -326,19 +326,27 @@ HEV_PID=$!
 log "hev-socks5-tunnel launched, PID=$HEV_PID"
 
 # --- 3. Ждём tun0 ---
+# Признак работающего туннеля — флаг UP внутри <> в выводе ip link.
+tun_is_up() { ip -o link show "$TUN_DEV" 2>/dev/null | grep -q '<[^>]*UP'; }
+
+dump_hev_log() {
+  log "HEV| --- hev log begin ---"
+  while IFS= read -r line; do log "HEV| $line"; done < "$HEV_LOG"
+  log "HEV| --- hev log end ---"
+}
+
 TUN_WAIT=0
 TUN_MAX_WAIT=15
 while [ "$TUN_WAIT" -lt "$TUN_MAX_WAIT" ]; do
-  if ip link show "$TUN_DEV" 2>/dev/null | grep -q "state UP"; then
+  if tun_is_up; then
     log "$TUN_DEV is UP (after ${TUN_WAIT}s)"
     break
   fi
   if ! kill -0 "$HEV_PID" 2>/dev/null; then
-    EXIT_CODE=$(wait "$HEV_PID" 2>/dev/null; echo $?)
-    log "[ERROR] hev died during wait (exit=$EXIT_CODE)"
-    cat "$HEV_LOG" 2>&1 || true
+    log "[ERROR] hev died during wait"
+    dump_hev_log
     if [ "$DEBUG_HOLD" = "1" ]; then
-      log "DEBUG_HOLD=1: sleeping 600s"
+      log "DEBUG_HOLD=1: sleeping 600s, connect via /container/shell xray-client"
       sleep 600
     fi
     die "hev-socks5-tunnel died"
@@ -347,13 +355,12 @@ while [ "$TUN_WAIT" -lt "$TUN_MAX_WAIT" ]; do
   TUN_WAIT=$((TUN_WAIT + 1))
 done
 
-if ! ip link show "$TUN_DEV" 2>/dev/null | grep -q "state UP"; then
+if ! tun_is_up; then
   log "[ERROR] $TUN_DEV did not come up within ${TUN_MAX_WAIT}s"
   log "[ERROR] hev PID=$HEV_PID still alive? $(kill -0 $HEV_PID 2>/dev/null && echo yes || echo no)"
-  log "[ERROR] hev log:"
-  cat "$HEV_LOG" 2>&1 || true
+  dump_hev_log
   if [ "$DEBUG_HOLD" = "1" ]; then
-    log "DEBUG_HOLD=1: sleeping 600s"
+    log "DEBUG_HOLD=1: sleeping 600s, connect via /container/shell xray-client"
     sleep 600
   fi
   die "$TUN_DEV failed to come up"
@@ -383,7 +390,8 @@ ip rule show
 log "=== Interfaces ==="
 ip -br link show
 log "=== hev-tunnel log tail ==="
-tail -30 "$HEV_LOG" 2>/dev/null || true
+log "=== hev-tunnel log tail ==="
+tail -30 "$HEV_LOG" 2>/dev/null | while IFS= read -r line; do log "HEV| $line"; done
 
 trap 'log "Stopping..."; kill $HEV_PID $XRAY_PID 2>/dev/null; wait; exit 0' TERM INT
 wait $XRAY_PID $HEV_PID
