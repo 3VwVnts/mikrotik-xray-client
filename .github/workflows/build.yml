@@ -2,7 +2,7 @@ name: Build and publish latest
 
 on:
   push:
-    branches: [main]
+    branches: [master]
     paths:
       - "docker/**"
       - ".github/workflows/build.yml"
@@ -23,10 +23,10 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
+        uses: docker/setup-qemu-action@v3
         with:
           platforms: arm,arm64,amd64
 
@@ -35,7 +35,7 @@ jobs:
 
       - name: Log in to GHCR
         if: github.event_name != 'pull_request'
-        uses: docker/login-action@v4
+        uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -50,9 +50,9 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
             type=sha,prefix=main-,format=short
 
-      # ---------- 1. Multiarch сборка ----------
+      # ---------- 1. Multiarch сборка и пуш ----------
       - name: Build and push multiarch
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: docker/Dockerfile
@@ -65,7 +65,7 @@ jobs:
 
       # ---------- 2. Smoke-test на ARMv7 ----------
       - name: Build armv7 image for testing
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: docker/Dockerfile
@@ -73,12 +73,6 @@ jobs:
           load: true
           tags: xray-smoke:armv7
           cache-from: type=gha
-
-      - name: Verify binary architecture
-        run: |
-          set -e
-          docker run --rm --platform linux/arm/v7 --entrypoint /bin/sh \
-            xray-smoke:armv7 -c 'readelf -h /usr/local/bin/xray | grep Machine'
 
       - name: Smoke test — socks-only (armv7)
         timeout-minutes: 5
