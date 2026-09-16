@@ -19,10 +19,10 @@ jobs:
         id: current
         run: |
           XRAY=$(grep -oP 'ARG XRAY_VERSION=\K.*' docker/Dockerfile | head -1)
-          T2S=$(grep -oP 'ARG TUN2SOCKS_VERSION=\K.*' docker/Dockerfile | head -1)
+          HEV=$(grep -oP 'ARG HEV_VERSION=\K.*' docker/Dockerfile | head -1)
           echo "xray=$XRAY" >> "$GITHUB_OUTPUT"
-          echo "t2s=$T2S"   >> "$GITHUB_OUTPUT"
-          echo "Current: Xray=$XRAY tun2socks=$T2S"
+          echo "hev=$HEV"   >> "$GITHUB_OUTPUT"
+          echo "Current: Xray=$XRAY hev-socks5-tunnel=$HEV"
 
       - name: Query latest releases
         id: latest
@@ -31,35 +31,35 @@ jobs:
         run: |
           set -e
           XRAY=$(gh api repos/XTLS/Xray-core/releases/latest --jq .tag_name)
-          T2S=$(gh api repos/xjasonlyu/tun2socks/releases/latest --jq .tag_name)
+          HEV=$(gh api repos/heiher/hev-socks5-tunnel/releases/latest --jq .tag_name)
           echo "xray=$XRAY" >> "$GITHUB_OUTPUT"
-          echo "t2s=$T2S"   >> "$GITHUB_OUTPUT"
-          echo "Latest:  Xray=$XRAY tun2socks=$T2S"
+          echo "hev=$HEV"   >> "$GITHUB_OUTPUT"
+          echo "Latest:  Xray=$XRAY hev-socks5-tunnel=$HEV"
 
       - name: Detect changes
         id: diff
         run: |
           CHANGED=0
           [ "${{ steps.current.outputs.xray }}" != "${{ steps.latest.outputs.xray }}" ] && CHANGED=1
-          [ "${{ steps.current.outputs.t2s }}"  != "${{ steps.latest.outputs.t2s }}"  ] && CHANGED=1
+          [ "${{ steps.current.outputs.hev }}"  != "${{ steps.latest.outputs.hev }}"  ] && CHANGED=1
           echo "changed=$CHANGED" >> "$GITHUB_OUTPUT"
 
       - name: Apply updates
         if: steps.diff.outputs.changed == '1'
         env:
           NEW_XRAY: ${{ steps.latest.outputs.xray }}
-          NEW_T2S: ${{ steps.latest.outputs.t2s }}
+          NEW_HEV: ${{ steps.latest.outputs.hev }}
           OLD_XRAY: ${{ steps.current.outputs.xray }}
-          OLD_T2S: ${{ steps.current.outputs.t2s }}
+          OLD_HEV: ${{ steps.current.outputs.hev }}
         run: |
           sed -i "s|ARG XRAY_VERSION=.*|ARG XRAY_VERSION=${NEW_XRAY}|"           docker/Dockerfile
-          sed -i "s|ARG TUN2SOCKS_VERSION=.*|ARG TUN2SOCKS_VERSION=${NEW_T2S}|" docker/Dockerfile
+          sed -i "s|ARG HEV_VERSION=.*|ARG HEV_VERSION=\"${NEW_HEV}\"|" docker/Dockerfile
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           echo "NEW_XRAY=$NEW_XRAY" >> "$GITHUB_ENV"
-          echo "NEW_T2S=$NEW_T2S"   >> "$GITHUB_ENV"
+          echo "NEW_HEV=$NEW_HEV"   >> "$GITHUB_ENV"
           echo "OLD_XRAY=$OLD_XRAY" >> "$GITHUB_ENV"
-          echo "OLD_T2S=$OLD_T2S"   >> "$GITHUB_ENV"
+          echo "OLD_HEV=$OLD_HEV"   >> "$GITHUB_ENV"
 
       - name: Create PR
         if: steps.diff.outputs.changed == '1'
@@ -76,24 +76,24 @@ jobs:
           | Компонент | Было | Стало |
           |---|---|---|
           | Xray-core | \`${OLD_XRAY}\` | \`${NEW_XRAY}\` |
-          | tun2socks | \`${OLD_T2S}\` | \`${NEW_T2S}\` |
+          | hev-socks5-tunnel | \`${OLD_HEV}\` | \`${NEW_HEV}\` |
 
           **Что проверить перед мержем:**
           - [ ] Changelog Xray-core: https://github.com/XTLS/Xray-core/releases/tag/${NEW_XRAY}
-          - [ ] Changelog tun2socks: https://github.com/xjasonlyu/tun2socks/releases/tag/${NEW_T2S}
+          - [ ] Changelog hev-socks5-tunnel: https://github.com/heiher/hev-socks5-tunnel/releases/tag/${NEW_HEV}
           - [ ] Дождаться зелёного smoke-test (armv7) в CI
           - [ ] После мержа — собрать релиз тегом \`vX.Y.Z\`
 
-          После мержа в \`main\` workflow \`build.yml\` соберёт \`latest\` и прогонит smoke-test.
+          После мержа в \`master\` workflow \`build.yml\` соберёт \`latest\` и прогонит smoke-test.
           EOF
           )
 
           git add docker/Dockerfile
-          git commit -m "chore(deps): bump Xray-core ${OLD_XRAY}→${NEW_XRAY}, tun2socks ${OLD_T2S}→${NEW_T2S}"
+          git commit -m "chore(deps): bump Xray-core ${OLD_XRAY}→${NEW_XRAY}, hev-socks5-tunnel ${OLD_HEV}→${NEW_HEV}"
           git push origin "$BRANCH"
 
           gh pr create \
-            --title "chore(deps): Xray ${NEW_XRAY}, tun2socks ${NEW_T2S}" \
+            --title "chore(deps): Xray ${NEW_XRAY}, hev-socks5-tunnel ${NEW_HEV}" \
             --body "$BODY" \
-            --base main \
+            --base master \
             --head "$BRANCH"
