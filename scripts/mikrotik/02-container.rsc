@@ -5,8 +5,8 @@
 # USER CONFIG — единственное место, где нужны правки
 # ============================================================
 :local vlessURI "PLACEHOLDER_VLESS_URI"
-:local imageName "ghcr.io/3vwvnts/mikrotik-xray-client:latest"
-:local containerName "xray-client"
+:local imageName "ghcr.io/3vwvnts/mikrotik-xray-gateway:latest"
+:local containerName "xray-gateway"
 :local vethName "veth-xray"
 # ============================================================
 
@@ -85,7 +85,7 @@
     restart-interval=30s \
     restart-max-count=0 \
     logging=yes \
-    comment="Xray client (VLESS+Reality + hev-socks5-tunnel)"
+    comment="Xray gateway (VLESS+Reality + hev-socks5-tunnel)"
 
 :log info "02: created container $containerName"
 

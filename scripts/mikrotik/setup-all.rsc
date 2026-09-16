@@ -35,6 +35,6 @@
 :delay 2s
 
 :log info "=== Xray MikroTik setup: DONE ==="
-:log info "Проверка: /container print detail where name=xray-client"
+:log info "Проверка: /container print detail where name=xray-gateway"
 :log info "Проверка: /log print where topics~\"container\""
 :log info "Проверка: curl через LAN → https://ifconfig.me должен показать IP VPS"

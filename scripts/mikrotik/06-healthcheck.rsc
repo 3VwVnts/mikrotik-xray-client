@@ -5,7 +5,7 @@
 
 :log info "06: starting healthcheck setup"
 
-:local containerName "xray-client"
+:local containerName "xray-gateway"
 
 # --- 1. Убеждаемся, что restart-policy включён ---
 :if ([:len [/container find where name=$containerName]] > 0) do={
@@ -28,7 +28,7 @@
 }
 
 /system script add name=$hcName source={
-    :local containerName "xray-client"
+    :local containerName "xray-gateway"
     :local c [/container find where name=$containerName]
     :if ([:len $c] = 0) do={
         :log warning "hc: container $containerName not found"
@@ -50,7 +50,7 @@
 :local schName "xray-healthcheck"
 :if ([:len [/system scheduler find where name=$schName]] > 0) do={
     /system scheduler remove [find name=$schName]
-    :log info "06: removed old scheduler $schName"
+    :log info "06: removed old $schName scheduler"
 }
 
 /system scheduler add \
@@ -59,7 +59,7 @@
     start-time=startup \
     on-event="/system script run $hcName" \
     policy=read,write,test \
-    comment="Health-check for Xray container"
+    comment="Health-check for Xray gateway container"
 
 :log info "06: created scheduler $schName (every 5m)"
 
