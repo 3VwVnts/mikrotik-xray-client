@@ -23,11 +23,11 @@
 :delay 2s
 
 :log info "=== Stage 04: mangle (mark traffic) ==="
-/import file-name=04-mangle.rsc
+/import file-name=05-nat-forward.rsc
 :delay 2s
 
 :log info "=== Stage 05: NAT + forward ==="
-/import file-name=05-nat-forward.rsc
+/import file-name=name=04-mangle.rsc
 :delay 2s
 
 :log info "=== Stage 06: healthcheck ==="

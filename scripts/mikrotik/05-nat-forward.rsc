@@ -1,65 +1,20 @@
-# ============================================================
-# 05-nat-forward.rsc
-# NAT для контейнера + правила forward
-# ============================================================
+# NAT уже покрыт LAN_SUBNET; добавляем только forward-доступ и QUIC-drop.
+# КРИТИЧНО: новые правила должны стоять ВЫШЕ "Drop all other".
+:log info "05: start"
+:local anchor [/ip firewall filter find comment="forward: Drop all other (Default Deny)"]
 
-:log info "05: starting NAT/forward setup"
-
-# --- 1. NAT для контейнера (172.17.0.0/24 через L2TP) ---
-:if ([:len [/ip firewall nat find comment="NAT Xray container to L2TP"]] = 0) do={
-    /ip firewall nat add \
-        chain=srcnat \
-        action=masquerade \
-        src-address=172.17.0.0/24 \
-        out-interface=freedom-l2tp \
-        comment="NAT Xray container to L2TP"
-    :log info "05: added NAT rule for container"
-} else={
-    :log info "05: NAT rule for container already exists"
+:if ([:len [/ip firewall filter find where comment="Allow LAN to Xray container"]] = 0) do={
+    /ip firewall filter add chain=forward action=accept \
+        in-interface=bridge_LAN out-interface=veth-xray \
+        place-before=$anchor comment="Allow LAN to Xray container"
+    :log info "05: forward LAN->Xray added"
 }
 
-# --- 2. Forward: LAN -> Xray (veth-xray) ---
-:if ([:len [/ip firewall filter find comment="Allow LAN to Xray container"]] = 0) do={
-    /ip firewall filter add \
-        chain=forward \
-        action=accept \
-        in-interface=bridge_LAN \
-        out-interface=veth-xray \
-        comment="Allow LAN to Xray container"
-    :log info "05: added forward LAN -> Xray"
+# QUIC (UDP:443) помеченных соединений дропаем -> клиенты сразу идут по TCP
+:if ([:len [/ip firewall filter find where comment="Block QUIC for proxied"]] = 0) do={
+    /ip firewall filter add chain=forward action=drop protocol=udp dst-port=443 \
+        in-interface=bridge_LAN connection-mark=xray-conn \
+        place-before=$anchor comment="Block QUIC for proxied"
+    :log info "05: QUIC drop added"
 }
-
-# --- 3. Forward: Xray -> LAN (обратный трафик) ---
-:if ([:len [/ip firewall filter find comment="Allow Xray container to LAN"]] = 0) do={
-    /ip firewall filter add \
-        chain=forward \
-        action=accept \
-        in-interface=veth-xray \
-        out-interface=bridge_LAN \
-        comment="Allow Xray container to LAN"
-    :log info "05: added forward Xray -> LAN"
-}
-
-# --- 4. Forward: Xray -> WAN (L2TP) для выхода в интернет ---
-:if ([:len [/ip firewall filter find comment="Allow Xray container to L2TP"]] = 0) do={
-    /ip firewall filter add \
-        chain=forward \
-        action=accept \
-        in-interface=veth-xray \
-        out-interface=freedom-l2tp \
-        comment="Allow Xray container to L2TP"
-    :log info "05: added forward Xray -> L2TP"
-}
-
-# --- 5. Forward: WAN -> Xray (обратный трафик из интернета) ---
-:if ([:len [/ip firewall filter find comment="Allow L2TP to Xray container"]] = 0) do={
-    /ip firewall filter add \
-        chain=forward \
-        action=accept \
-        in-interface=freedom-l2tp \
-        out-interface=veth-xray \
-        comment="Allow L2TP to Xray container"
-    :log info "05: added forward L2TP -> Xray"
-}
-
-:log info "05: NAT/forward setup complete"
+:log info "05: done"

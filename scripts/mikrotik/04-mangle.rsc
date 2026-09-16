@@ -1,114 +1,47 @@
-# ============================================================
-# 04-mangle.rsc
-# Маркировка трафика LAN для Xray + MSS clamp
-# ============================================================
+# split только для xray-domains. VPS/локальные сети -> bypass.
+:log info "04: start"
 
-:log info "04: starting mangle setup"
-
-# --- 1. Создаём address-list с локальными сетями (исключения) ---
 /ip firewall address-list
 :if ([:len [find where list="LOCAL"]] = 0) do={
     add list=LOCAL address=192.168.10.0/24 comment="Local LAN"
-    add list=LOCAL address=10.10.10.0/24 comment="WireGuard subnet"
+    add list=LOCAL address=10.10.10.0/24 comment="WireGuard"
     add list=LOCAL address=172.17.0.0/24 comment="Container subnet"
+    add list=LOCAL address=198.18.0.0/15 comment="Container tun net"
     add list=LOCAL address=224.0.0.0/4 comment="Multicast"
+    add list=LOCAL address=255.255.255.255/32 comment="DHCP broadcast"
     add list=LOCAL address=192.168.10.1 comment="Router IP"
-    :log info "04: created LOCAL address-list"
-} else={
-    :log info "04: LOCAL address-list already exists"
+    add list=LOCAL address=151.243.169.168 comment="VPS - loop guard"
+    :log info "04: LOCAL list created"
 }
 
-# --- 2. Находим правило, перед которым нужно вставить новые ---
-:local placeBefore [/ip firewall mangle find comment="Mangle: Fix L2TP MSS Out"]
-
-# --- 3. Помечаем соединения из LAN (кроме локальных) ---
-:local markConnRule [/ip firewall mangle find comment="Mark LAN connections for Xray"]
-:if ([:len $markConnRule] = 0) do={
-    :if ([:len $placeBefore] > 0) do={
-        /ip firewall mangle add \
-            chain=prerouting \
-            in-interface=bridge_LAN \
-            dst-address-list=!LOCAL \
-            connection-mark=no-mark \
-            action=mark-connection \
-            new-connection-mark=xray-conn \
-            passthrough=yes \
-            place-before=$placeBefore \
-            comment="Mark LAN connections for Xray"
-    } else={
-        /ip firewall mangle add \
-            chain=prerouting \
-            in-interface=bridge_LAN \
-            dst-address-list=!LOCAL \
-            connection-mark=no-mark \
-            action=mark-connection \
-            new-connection-mark=xray-conn \
-            passthrough=yes \
-            comment="Mark LAN connections for Xray"
+# --- Список прокси-доменов (FQDN, RouterOS резолвит сам) ---
+:if ([:len [find where list="xray-domains"]] = 0) do={
+    :foreach d in={"youtube.com";"www.youtube.com";"youtu.be";"googlevideo.com";"ytimg.com";"ggpht.com";"youtubei.googleapis.com";"google.com";"www.google.com";"gstatic.com";"googleapis.com";"googleusercontent.com";"gvt1.com";"instagram.com";"www.instagram.com";"cdninstagram.com";"facebook.com";"fbcdn.net";"whatsapp.com";"whatsapp.net";"openai.com";"chatgpt.com";"oaistatic.com";"oaiusercontent.com";"anthropic.com";"claude.ai";"twitter.com";"x.com";"twimg.com";"netflix.com";"nflxvideo.net";"nflximg.net";"spotify.com";"scdn.co";"discord.com";"discordapp.com";"discordapp.net";"discord.media";"cloudflare.com";"www.cloudflare.com"} do={
+        /ip firewall address-list add list=xray-domains address=$d
     }
-    :log info "04: added mark-connection rule for LAN"
+    :log info "04: xray-domains list created"
 }
 
-# --- 4. Помечаем маршрут для этих соединений ---
-:local markRouteRule [/ip firewall mangle find comment="Route marked connections to Xray"]
-:if ([:len $markRouteRule] = 0) do={
-    :if ([:len $placeBefore] > 0) do={
-        /ip firewall mangle add \
-            chain=prerouting \
-            connection-mark=xray-conn \
-            action=mark-routing \
-            new-routing-mark=xray \
-            passthrough=no \
-            place-before=$placeBefore \
-            comment="Route marked connections to Xray"
-    } else={
-        /ip firewall mangle add \
-            chain=prerouting \
-            connection-mark=xray-conn \
-            action=mark-routing \
-            new-routing-mark=xray \
-            passthrough=no \
-            comment="Route marked connections to Xray"
-    }
-    :log info "04: added mark-routing rule for Xray"
+# --- Разметка (in-interface обязателен - защита от петли) ---
+:if ([:len [/ip firewall mangle find where comment="xray-split: mark proxy domains"]] = 0) do={
+    /ip firewall mangle add chain=prerouting in-interface=bridge_LAN \
+        dst-address-list=xray-domains connection-mark=no-mark \
+        action=mark-connection new-connection-mark=xray-conn passthrough=yes \
+        comment="xray-split: mark proxy domains"
+}
+:if ([:len [/ip firewall mangle find where comment="xray-split: route to container"]] = 0) do={
+    /ip firewall mangle add chain=prerouting in-interface=bridge_LAN \
+        connection-mark=xray-conn action=mark-routing new-routing-mark=xray \
+        passthrough=no comment="xray-split: route to container"
 }
 
-# --- 5. MSS clamp для veth-xray (и входящий, и исходящий) ---
-:local mssOut [/ip firewall mangle find comment="MSS clamp out to Xray"]
-:if ([:len $mssOut] = 0) do={
-    /ip firewall mangle add \
-        chain=forward \
-        action=change-mss \
-        new-mss=clamp-to-pmtu \
-        protocol=tcp \
-        tcp-flags=syn \
-        out-interface=veth-xray \
-        passthrough=yes \
-        comment="MSS clamp out to Xray"
-    :log info "04: added MSS clamp out to Xray"
+# --- MSS clamp для veth (tun0 MTU 1420 -> MSS 1380) ---
+:if ([:len [/ip firewall mangle find where comment="MSS clamp out to Xray"]] = 0) do={
+    /ip firewall mangle add chain=forward action=change-mss new-mss=1380 passthrough=yes \
+        tcp-flags=syn protocol=tcp out-interface=veth-xray comment="MSS clamp out to Xray"
 }
-
-:local mssIn [/ip firewall mangle find comment="MSS clamp in from Xray"]
-:if ([:len $mssIn] = 0) do={
-    /ip firewall mangle add \
-        chain=forward \
-        action=change-mss \
-        new-mss=clamp-to-pmtu \
-        protocol=tcp \
-        tcp-flags=syn \
-        in-interface=veth-xray \
-        passthrough=yes \
-        comment="MSS clamp in from Xray"
-    :log info "04: added MSS clamp in from Xray"
+:if ([:len [/ip firewall mangle find where comment="MSS clamp in from Xray"]] = 0) do={
+    /ip firewall mangle add chain=forward action=change-mss new-mss=1380 passthrough=yes \
+        tcp-flags=syn protocol=tcp in-interface=veth-xray comment="MSS clamp in from Xray"
 }
-
-# --- 6. Обновляем FastTrack, чтобы он не обходил маркировку ---
-:local fastTrack [/ip firewall filter find comment="FastTrack: LAN->WAN"]
-:if ([:len $fastTrack] > 0) do={
-    /ip firewall filter set $fastTrack connection-mark=no-mark
-    :log info "04: updated FastTrack rule with connection-mark=no-mark"
-} else={
-    :log warning "04: FastTrack rule not found (comment='FastTrack: LAN->WAN')"
-}
-
-:log info "04: mangle setup complete"
+:log info "04: done"
