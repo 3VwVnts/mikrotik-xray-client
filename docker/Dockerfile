@@ -18,14 +18,13 @@ RUN git clone --depth 1 --branch "${HEV_VERSION}" --recursive \
     && strip bin/hev-socks5-tunnel
 
 # =========================================================
-# Stage 2: Xray-core + geo data
+# Stage 2: Xray-core
 # =========================================================
 FROM alpine:3.21 AS fetch
 
 ARG TARGETARCH
 ARG TARGETVARIANT
 ARG XRAY_VERSION=v26.3.27
-ARG GEODATA_URL="https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download"
 
 RUN apk add --no-cache curl unzip ca-certificates
 
@@ -44,9 +43,6 @@ RUN set -e; \
       "https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}/Xray-linux-${XRAY_ARCH}.zip"; \
     unzip -o xray.zip xray; chmod +x xray
 
-RUN curl -fL -o geoip.dat   "${GEODATA_URL}/geoip.dat" && \
-    curl -fL -o geosite.dat "${GEODATA_URL}/geosite.dat"
-
 # =========================================================
 # Stage 3: final image
 # =========================================================
@@ -62,19 +58,9 @@ RUN apk add --no-cache \
 COPY --from=hev   /src/bin/hev-socks5-tunnel /usr/local/bin/hev-socks5-tunnel
 COPY --from=fetch /tmp/xray                  /usr/local/bin/xray
 
-RUN mkdir -p /usr/local/share/xray
-COPY --from=fetch /tmp/geoip.dat   /usr/local/share/xray/geoip.dat
-COPY --from=fetch /tmp/geosite.dat /usr/local/share/xray/geosite.dat
-
-RUN mkdir -p /var/lib/xray/geo
-
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
-ENV XRAY_LOCATION_CONFIG=/etc/xray/config.json \
-    GEO_CACHE_DIR=/var/lib/xray/geo \
-    GEO_MAX_AGE_DAYS=3
-
-VOLUME ["/var/lib/xray/geo"]
+ENV XRAY_LOCATION_CONFIG=/etc/xray/config.json
 
 ENTRYPOINT ["/entrypoint.sh"]
